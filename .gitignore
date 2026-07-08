@@ -1,0 +1,84 @@
+# API 키 및 환경설정 — 절대 Git에 올리지 않음
+.env
+.env.local
+.env.*.local
+MEMORY.md
+
+# 가상환경
+.venv_edge_local/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 모델 파일 (용량 큼)
+*.pt
+*.onnx
+!edge/models/yolo26s-pose.onnx
+*.engine
+*.trt
+
+# 로컬 결과 파일
+edge/storage/results/
+edge/storage/buffer/
+edge/storage/pending_candidates/
+
+# 배포 번들
+deploy/
+
+# AI 에이전트 캐시 및 런타임 부산물
+.agent/
+.agents/
+.antigravitycli/
+.codegraph/
+.gjc/
+.omo/
+.omx/
+.tmp/
+
+# 에디터/IDE 설정
+.vscode/
+.cursor/
+
+# 런타임 로그 및 임시 결과물
+runs/
+scratch/
+reports/
+evidence/
+experiments/
+temp_test/
+plans/
+data/
+kanban.zip
+*.log
+*.jsonl
+
+# 노드 모듈
+node_modules/
+package-lock.json
+package.json
+skills-lock.json
+
+# AI 검토 출력
+docs/plan_review_output.md
+
+# Codex 관련 (일부만 보존)
+.codex/*
+!.codex/agents/
+!.codex/agents/**
+!.codex/skills/
+!.codex/skills/**
+.codex/skills/.system/**
+!.codex/prompts/
+!.codex/prompts/**
+
+# 디버그 임시 파일
+scratch_debug_frame.*
+.debug-journal.md
+
+# 빌드/컴파일 캐시
+*.pyc
+*.pyd
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,126 @@
+app:
+  name: "elderly-care-orin-edge-hub"
+
+patient:
+  patient_id: "P001"
+
+database:
+  url: "sqlite+aiosqlite:///server/storage/orin_local_server.db?timeout=30"
+
+storage:
+  results_dir: "server/storage/results"
+  video_dir: "server/storage/videos"
+  clip_json_dir: "server/storage/results/clip_json"
+
+events:
+  default_pre_clip_ms: 90000
+  default_post_clip_ms: 90000
+  confirm_after_ms: 30000
+  resolve_after_ms: 5000
+  clip_storage_policy: "segment_ring"
+  danger_labels:
+    - "DROP"
+    - "FALL"
+    - "GRADUAL_FALL"
+    - "GRADUAL_COLLAPSE"
+    - "LOSS_OF_BALANCE"
+    - "POST_FALL_IMMOBILITY"
+
+streams:
+  enabled: true
+
+stgcn:
+  model_path: "server/models/stgcn_fall_binary.pth"
+  device: "cuda"
+  backend: "pytorch"
+  precision: "auto"
+  window_ms: 5000
+  min_window_frames: 8
+
+tier_classification:
+  enabled: true
+  model_path: "edge/models/xgboost_tier_multiclass.json"
+  meta_path: "experiments/behavior_training/reports/xgboost_tier_multiclass_meta.json"
+  confidence_threshold: 0.55
+  window_frames: 12
+  min_history_frames: 4
+  default_label: "NORMAL"
+
+model_fusion:
+  enabled: true
+  stgcn_stride_ms: 1000
+  stgcn_prefilter_min_xgboost_probability: 0.4
+  stgcn_weight: 0.6
+  xgboost_weight: 0.4
+  decision_threshold: 0.7
+
+risk_features:
+  running_speed_threshold_px_s: 140.0
+  danger_speed_threshold_px_s: 260.0
+  collision_overlap_threshold: 0.35
+  collision_jerk_threshold: 180.0
+  static_threshold_ms: 30000.0
+  fall_torso_delta_threshold: 35.0
+  fall_head_drop_threshold: 0.05
+
+risk_smoothing:
+  alpha: 0.3
+  suspicious_threshold: 0.45
+  danger_threshold: 0.70
+  vote_window: 10
+
+local_archive:
+  enabled: true
+  save_dir: "server/storage/results"
+  rotation:
+    enabled: true
+    subdir: "daily"
+    retention_days: 7
+  candidate_requests_file: "candidate_requests.jsonl"
+  stgcn_results_file: "stgcn_results.jsonl"
+  pattern_results_file: "pattern_results.jsonl"
+  clip_json_dir: "clip_json"
+  clip_requests_file: "server_clip_requests.jsonl"
+  clip_results_file: "server_clip_results.jsonl"
+
+pattern_analyzer:
+  inactivity_threshold_sec: 300
+  night_start_hour: 22
+  night_end_hour: 6
+  pattern_deviation_pct: 30.0
+  snapshot:
+    enabled: true
+    path: "server/storage/results/pattern_state_snapshot.json"
+    interval_sec: 60
+    max_gap_sec: 300
+    max_track_age_sec: 3600
+    max_snapshot_size_kb: 512
+
+backend:
+  enabled: true
+  base_url: ""
+  device_key: "pi5-home001-cam1"
+  token: ""
+  events_batch_path: "/api/v1/events/batch"
+  alerts_immediate_path: "/api/v1/alerts/immediate"
+  batch_interval_sec: 10
+  normal_batch_interval_sec: 300
+  request_timeout_sec: 10.0
+  pending_file: "server/storage/results/backend_pending.jsonl"
+
+ingest_auth:
+  enabled: true
+  api_key: ""
+  api_key_env: "EDGE_INGEST_API_KEY"
+  api_key_header: "X-Edge-API-Key"
+  device_id_header: "X-Device-ID"
+  require_device_id: true
+
+media_server:
+  backend_clip_forward_enabled: true
+  clip_upload_auth_enabled: true
+  clip_upload_api_key: ""
+  clip_upload_api_key_env: "CLIP_UPLOAD_API_KEY"
+  clip_upload_api_key_header: "X-API-Key"
+  face_blur_on_upload: true
+  clip_receive_endpoint: null

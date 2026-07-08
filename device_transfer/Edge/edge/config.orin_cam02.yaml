@@ -1,0 +1,150 @@
+# ===================================================
+# Jetson Orin Nano + wide camera config
+# 실행: python -m edge.main --config edge/config.orin_cam02.yaml
+# ===================================================
+
+runtime:
+  role: "full_edge"
+
+camera:
+  camera_id: "orin_cam02"
+  display_name: "Orin Wide Camera 02"
+  room_id: "room_02"
+  backend: "opencv"             # CSI 카메라/GStreamer 확정 전 기본 OpenCV
+  source_mode: "device"
+  source: 0
+  resolution: [1280, 720]
+  processing_resolution: [640, 360]
+  fps: 30
+  loop_file: false
+  reconnect_interval_sec: 2.0
+  stream_url: "rtsp://orin:8554/orin_cam02"
+
+model:
+  model_name: "yolo26s-pose"
+  model_path: "edge/models/yolo26s-pose.pt"
+  backend: "auto"
+  imgsz: 640
+  inference_stride: 1
+  conf_threshold: 0.35
+  max_people: 1
+  device: 0
+
+classification:
+  model_path: "edge/models/xgboost_action.json"
+  labels: ["STANDING", "SITTING", "LYING", "WALKING", "TRANSITION", "UNKNOWN"]
+  confidence_threshold: 0.45
+  track_max_age_ms: 1500
+  track_iou_threshold: 0.25
+  timeline_idle_ms: 3000
+  candidate_cooldown_ms: 1000
+
+trigger_thresholds:
+  prolonged_floor_lying_duration_sec: 1800
+  gradual_fall_min_frames: 8
+  gradual_fall_min_torso_delta_deg: 35.0
+  gradual_fall_min_xgboost_prob: 0.4
+  gradual_fall_min_head_drop_norm: 0.05
+
+room_rois: {}                   # 예: bed: [0.0, 0.0, 0.5, 1.0] normalized x1,y1,x2,y2
+
+time_context:
+  use_wall_clock_for_night_activity: false
+
+tier_classification:
+  enabled: true
+  model_path: "edge/models/xgboost_fall_binary.json"
+  meta_path: "experiments/behavior_training/reports/xgboost_fall_meta.json"
+  confidence_threshold: 0.60
+  window_frames: 12
+  min_history_frames: 3
+  default_label: "NORMAL"
+  fallback_gate:
+    enabled: true
+    require_lying_label: false
+    min_center_velocity_px_s: 35.0
+    min_abs_vertical_velocity_px_s: 50.0
+    min_high_confidence: null
+    dynamic_flags:
+      - "vertical_velocity_spike"
+      - "center_velocity_spike"
+      - "bbox_aspect_ratio_change"
+      - "coarse_label_transition"
+      - "knee_angle_collapse"
+
+sender:
+  flush_interval_sec: 1.0
+  send_empty_frames: false
+
+buffer:
+  save_dir: "edge/storage/buffer_orin_cam02"
+  storage_mode: "segment_ring"
+  segment_duration_sec: 10
+  max_buffer_minutes: 30
+  danger_clip_max_duration_ms: 600000
+  codec: "mp4v"
+  index_file: "segments_index.jsonl"
+
+stream:
+  enabled: false
+  overlay_enabled: false
+  overlay_keypoint_threshold: 0.2
+  overlay_max_age_ms: 500
+  command: "ffmpeg -f v4l2 -framerate 30 -video_size 1280x720 -i /dev/video0 -an -c:v libx264 -preset ultrafast -tune zerolatency -f rtsp rtsp://127.0.0.1:8554/orin_cam02"
+
+server:
+  enabled: true
+  base_url: "http://127.0.0.1:8000"
+  ws_url: "ws://127.0.0.1:8000/ws/edges/{camera_id}"
+  skeleton_ws_pending_file: "edge/storage/results_orin_cam02/skeleton_ws_pending.jsonl"
+  skeleton_ws_max_pending_batches: 300
+  request_timeout_sec: 10
+  upload_clip_enabled: true
+  clip_upload_path: "/api/clips/upload"
+  ingest_api_key: ""
+  ingest_api_key_env: "EDGE_INGEST_API_KEY"
+  ingest_api_key_header: "X-Edge-API-Key"
+  device_id_header: "X-Device-ID"
+  require_device_id: true
+  clip_upload_api_key: ""
+  clip_upload_api_key_env: "CLIP_UPLOAD_API_KEY"
+  clip_upload_api_key_header: "X-API-Key"
+  candidate_max_retries: 3
+
+clip_request_server:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8092
+  api_key: ""
+  api_key_env: "EDGE_CLIP_REQUEST_API_KEY"
+  api_key_header: "X-Edge-Clip-Key"
+
+privacy:
+  face_blur_enabled: true
+  face_blur_location: "local"
+
+preprocess:
+  enabled: true
+  clahe_enabled: false
+  clahe_clip_limit: 2.0
+  clahe_tile_grid_size: 8
+  gamma: 1.0
+  brightness_warning_threshold: 70.0
+
+local_output:
+  enabled: true
+  save_dir: "edge/storage/results_orin_cam02"
+  rotation:
+    enabled: true
+    subdir: "daily"
+    retention_days: 7
+  frames_file: "activity_frames.jsonl"
+  timeline_file: "timeline_segments.jsonl"
+  candidates_file: "candidate_windows.jsonl"
+  trigger_debug_file: "trigger_debug.jsonl"
+  perf_stats_file: "perf_stats.jsonl"
+  perf_stats_interval_sec: 30.0
+  clip_json_dir: "clip_json"
+  clip_requests_file: "edge_clip_requests_orin_cam02.jsonl"
+  clip_results_file: "edge_clip_results_orin_cam02.jsonl"
+  clip_upload_pending_file: "clip_upload_pending_orin_cam02.jsonl"

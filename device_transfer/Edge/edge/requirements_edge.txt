@@ -1,0 +1,28 @@
+# ===========================================
+# Edge (라즈베리파이 5) 의존성
+# 설치: pip install -r requirements_edge.txt
+# ===========================================
+
+# --- AI 추론 ---
+ultralytics>=8.3.0          # YOLO pose inference
+onnxruntime>=1.17.0         # Optional ONNX runtime for future RTMPose fallback
+xgboost>=2.1.0              # 1st-stage action classifier
+
+# --- 영상 처리 ---
+opencv-python-headless>=4.9.0   # 영상 처리 (GUI 없는 버전, RPi용)
+numpy>=1.26.0
+
+# --- 통신 ---
+aiohttp>=3.9.0              # bbox JSON HTTP POST 전송
+websockets>=12.0            # 서버 event trigger 수신 (WebSocket)
+requests>=2.32.0            # server ingest / clip upload
+
+# --- 설정 ---
+pyyaml>=6.0                 # config.yaml 파싱
+pydantic>=2.0               # shared protocol schema validation
+
+# --- 카메라 (시스템 패키지) ---
+# picamera2                 # sudo apt install python3-picamera2
+# libcamera                 # sudo apt install python3-libcamera
+# adb                       # 휴대폰 USB 입력 시 Android platform-tools 필요
+# ffmpeg                    # clip concat 및 추가 변환 시 사용

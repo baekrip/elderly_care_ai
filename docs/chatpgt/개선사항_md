@@ -1,0 +1,465 @@
+Elderly Care Edge AI System - 현재 구조 및 디버깅 상태
+1. 최종 시스템 아키텍처
+[ Raspberry Pi 5 ]
+(Camera AI Node)
+
+ ├─ Wide Camera V3
+ ├─ OpenCV
+ ├─ YOLO Pose Detection
+ ├─ ONNX Runtime
+ ├─ Pose Feature Extraction
+ ├─ Face Detection / Face Blur
+ ├─ MediaMTX
+ ├─ WebRTC Streaming
+ ├─ RAM Ring Buffer
+ ├─ Event Clip Generator
+ ├─ WebSocket Skeleton Sender
+ ├─ REST Activity Sender
+ └─ REST Clip Upload Client
+
+            │
+            │ WebSocket(Skeleton/Pose)
+            │ REST(Activity Frames)
+            │ REST(Clip Upload)
+            ▼
+
+[ Jetson Orin Nano ]
+(Edge AI Node)
+
+ ├─ FastAPI Server
+ ├─ WebSocket Receiver
+ ├─ Activity REST Receiver
+ ├─ Temporal Sequence Buffer
+ ├─ Temporal Smoothing
+ ├─ XGBoost
+ ├─ ST-GCN
+ ├─ TensorRT Runtime(FP16)
+ ├─ Trigger Engine
+ ├─ Event State Machine
+ ├─ Timeline Synchronizer
+ ├─ Backend WS Client
+ └─ Backend REST Client
+
+            │
+            │ WebSocket(Alert/Event)
+            │ REST(Final Upload)
+            ▼
+
+[ Backend Server ]
+
+ ├─ WebSocket Server
+ ├─ REST API
+ ├─ Alert System
+ ├─ Dashboard
+ ├─ Event Database
+ ├─ Clip Storage
+ └─ WebRTC Viewer
+2. 현재 Pi5 → Orin 데이터 흐름
+Pose/Skeleton 실시간 처리
+Camera Frame
+    ↓
+YOLO Pose
+    ↓
+Pose Keypoint Extraction
+    ↓
+SkeletonFrameBatch 생성
+    ↓
+WebSocket 전송
+    ↓
+Orin WebSocket Receiver
+Activity Frame REST 처리
+Camera Frame
+    ↓
+ActivityFrameBatch 생성
+    ↓
+REST POST
+    ↓
+/api/activity/frames
+    ↓
+SQLite 저장
+3. 현재 runtime mode 구조
+
+현재 Pi5 sender 분기:
+
+if skeleton_sender_role and skeleton_sender is not None:
+    if skeleton_batch:
+        skeleton_sender.send_batch_sync(
+            SkeletonFrameBatch(frames=skeleton_batch)
+        )
+else:
+    client.send_activity_frames(
+        ActivityFrameBatch(frames=frame_batch)
+    )
+4. 현재 실제 runtime 상태
+
+현재 register payload:
+
+{
+  "runtime_role": "skeleton_sender"
+}
+
+즉 현재:
+
+Pi5는 websocket skeleton sender mode
+
+로 실행 중.
+
+5. 현재 정상 동작 상태
+
+현재 정상 확인:
+
+✔ camera open
+✔ pose inference
+✔ websocket connect
+✔ FastAPI route
+✔ SQLite DB
+✔ camera register
+✔ websocket streaming
+6. 현재 미완성 상태
+□ skeleton payload ingest 검증
+□ activity REST ingest 활성화
+□ ST-GCN inference
+□ risk event generation
+□ trigger engine
+□ clip upload pipeline
+□ MediaMTX/WebRTC integration
+7. 현재 activity_frames insert 안 되는 이유
+
+원인:
+
+REST upload 분기 자체를 안 탐
+
+왜냐하면:
+
+runtime_role = skeleton_sender
+
+이기 때문.
+
+즉:
+
+client.send_activity_frames()
+
+호출 자체가 안 됨.
+
+8. 현재 구조 핵심
+
+현재 구조는:
+
+Skeleton WebSocket Streaming ONLY
+
+상태.
+
+즉:
+
+REST activity upload 비활성 상태는 정상 동작.
+9. 현재 Orin REST endpoint 상태
+Route
+router = APIRouter(
+    prefix="/api",
+    tags=["activity"]
+)
+
+@router.post("/activity/frames")
+async def ingest_activity_frames(...):
+
+실제 endpoint:
+
+/api/activity/frames
+10. Router 등록 상태
+app.include_router(activity_router)
+
+이미 정상 등록 완료.
+
+11. 실제 endpoint 테스트 결과
+/api/activity/frames → 422
+
+의미:
+
+endpoint 존재 정상
+/activity/frames → 404
+
+의미:
+
+prefix 없는 경로라 정상
+12. sender 디버깅 결과
+
+edge/sender.py:
+
+print("STATUS:", response.status_code)
+print("BODY:", response.text)
+
+출력:
+
+STATUS: 200
+BODY: {"status":"ok"}
+
+의미:
+
+camera register 성공
+13. 현재 SQLite 상태
+
+DB:
+
+sqlite+aiosqlite:///server/storage/orin_local_server.db
+
+테이블:
+
+activity_frames
+timeline_segments
+risk_events
+video_clips
+cameras
+14. 현재 activity_frames 상태
+row count = 0
+
+원인:
+
+REST activity ingest 미실행
+
+DB 문제 아님.
+
+15. 현재 선택 가능한 구조
+선택지 1
+
+REST ingest 테스트 목적:
+
+skeleton_sender_role=False
+
+또는:
+
+runtime_role 변경
+
+그러면:
+
+client.send_activity_frames()
+
+활성화.
+
+선택지 2
+
+현재 구조 유지:
+
+skeleton_sender runtime 유지
+
+즉:
+
+websocket skeleton pipeline 중심.
+
+이 경우:
+
+activity_frames insert는 목표 아님.
+16. 현재 권장 구조
+
+현재 프로젝트 기준 추천:
+
+Pose/Skeleton → WebSocket
+Risk Clip → REST Upload
+17. 실시간 처리 구조
+Pi5 Camera
+    ↓
+YOLO Pose
+    ↓
+Skeleton JSON
+    ↓
+WebSocket
+    ↓
+Orin
+    ↓
+Temporal Buffer
+    ↓
+ST-GCN
+    ↓
+Trigger Engine
+    ↓
+즉시 Alert
+18. 실시간 스트리밍 구조
+Pi5 Camera
+    ↓
+MediaMTX
+    ↓
+WebRTC
+    ↓
+Frontend Viewer
+19. 실시간 동기화 핵심
+
+중요:
+
+clip 기반 동기화 ❌
+timestamp 기반 overlay ⭕
+20. Timestamp 구조
+{
+  "frame_id": 12345,
+  "timestamp": 1711111111.234
+}
+21. 위험 이벤트 구조
+{
+  "event": "fall_detected",
+  "risk_score": 0.93,
+  "timestamp": 1711111111.234,
+  "camera_id": "cam1"
+}
+22. Frontend 동기화 방식
+현재 WebRTC frame timestamp
+=
+위험 event timestamp
+
+동일 시점 overlay.
+
+23. 목표 성능
+항목	목표
+WebRTC latency	100~300ms
+YOLO inference	50~120ms
+WS 전송	10~30ms
+ST-GCN	50~150ms
+Trigger	10~50ms
+총 체감 위험 알람	0.5~1.5초
+24. Temporal Sequence Buffer
+
+목적:
+
+최근 skeleton sequence 저장
+
+권장:
+
+최근 2~5초 sequence 유지
+25. Temporal Smoothing
+
+목적:
+
+순간 오탐 제거
+
+권장:
+
+EMA(Exponential Moving Average)
+
+공식:
+
+smooth =
+alpha * current
++
+(1-alpha) * previous
+26. Trigger Engine 구조
+NORMAL
+→ SUSPICIOUS
+→ DANGEROUS
+→ CONFIRMED
+27. 위험 Clip 처리 구조
+실시간 영상
+    ↓
+RAM Ring Buffer 저장
+    ↓
+위험 발생
+    ↓
+특정 timestamp clip 추출
+    ↓
+Face Blur
+    ↓
+REST Upload
+28. Face Blur 핵심 원칙
+실시간 전체 blur ❌
+위험 clip만 blur ⭕
+29. Face Blur 처리 흐름
+위험 발생
+    ↓
+Ring Buffer clip 생성
+    ↓
+Face Detection
+    ↓
+Gaussian Blur
+    ↓
+Blurred Clip 생성
+    ↓
+REST Upload
+30. 권장 Face Detection 모델
+모델	특징
+Haar Cascade	매우 가벼움
+YuNet	권장
+RetinaFace	무거움
+
+추천:
+
+OpenCV YuNet
+31. Blur 처리 예시
+roi = cv2.GaussianBlur(
+    roi,
+    (51, 51),
+    30
+)
+32. Pi5 Runtime 구조
+YOLO PyTorch
+    ↓
+ONNX Export
+    ↓
+ONNX Runtime Inference
+33. Orin Runtime 구조
+ST-GCN PyTorch
+    ↓
+ONNX Export
+    ↓
+TensorRT Engine
+    ↓
+FP16 Inference
+34. 최종 권장 구조
+[Pi5]
+
+640p Camera
+    ↓
+YOLO Pose
+    ↓
+ONNX Runtime
+    ↓
+Skeleton WS Streaming
+    ↓
+MediaMTX(WebRTC)
+    ↓
+Ring Buffer 저장
+
+(위험 발생 시)
+    ↓
+Clip 생성
+    ↓
+Face Blur
+    ↓
+REST Upload
+
+────────────────────
+
+[Orin]
+
+WebSocket Receiver
+    ↓
+Temporal Sequence Buffer
+    ↓
+Temporal Smoothing
+    ↓
+XGBoost
+    ↓
+ST-GCN
+    ↓
+TensorRT(FP16)
+    ↓
+Trigger Engine
+    ↓
+즉시 Backend Alert(WebSocket)
+
+────────────────────
+
+[Backend]
+
+WebRTC Viewer
+    ↓
+동일 timestamp overlay
+    ↓
+실시간 위험 표시
+
+35. 추가사항
+  1. 모든 행동의 결과 json을 젯슨으로 전송하는것과(위험, 일상분류없이 전부)
+  2. 위험clip생성(모든clip생성후 위험판별후 요청한 타임스탭프의 클립만 따로 face blur처리해서 서버로 전송)
+  3. 클립생성테스트시 mp4파일형태는 metadata가 제대로 기록되지않아 mkv형태로 변경한다
+  4. .mkv파일로 테스트시 색깨짐현상이 있었음
+  5. 실기기 작동 테스트해봤을때 위험clip부분생성이 안되고, json전송이 제대로 안되는거같아 sqllite3내의 activity_frames에 아무것도안들어가서 0으로 나와
+[이전방법.md](docs/이전방법.md)에서 
+- 11까진 성공
+- 12에 명령어진행시 clip_request랑 clip_results성공  clip_upload_pending 찾지못함  해당내용 나옴 missing_clip manual-test-001 
+- 13의 외부백엔드, WebRTC스트리밍 검증 성공(백엔드, 프론트엔드로 전송 성공적 1s이내 딜레이)
+- 14 /dev/video0파일을 열지못하고 ERROR처리됨

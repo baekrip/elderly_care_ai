@@ -1,0 +1,15 @@
+[Unit]
+Description=Elderly Care AI Orin Camera 02
+After=network-online.target elderly-orin-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jetson/elderly_care_ai
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/jetson/elderly_care_ai/.venv_edge/bin/python -m edge.main --config edge/config.orin_cam02.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Elderly Care AI Orin Edge Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eagleeye
+Group=eagleeye
+WorkingDirectory=/home/eagleeye/elderly_care_ai
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/eagleeye/elderly_care_ai/.venv_edge/bin/python -m server.main --config server/config.orin.yaml --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

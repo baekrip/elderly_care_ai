@@ -1,0 +1,15 @@
+[Unit]
+Description=Elderly Care AI MediaMTX
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/eagleeye/elderly_care_ai
+ExecStart=/home/eagleeye/elderly_care_ai/mediamtx /home/eagleeye/elderly_care_ai/mediamtx.yml
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

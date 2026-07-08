@@ -1,0 +1,19 @@
+[Unit]
+Description=Elderly Care AI Edge Camera 01
+Requires=elderly-mediamtx.service
+After=elderly-mediamtx.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/eagleeye/elderly_care_ai
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/eagleeye/elderly_care_ai/.env
+ExecStart=/home/eagleeye/elderly_care_ai/.venv_edge/bin/python -m edge.main --config edge/config.raspi_cam01.yaml
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

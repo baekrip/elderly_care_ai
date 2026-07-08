@@ -1,0 +1,170 @@
+# ===================================================
+# Pi5 + wide camera config (P5-B smoke test)
+# 실행: python -m edge.main --config edge/config.raspi_cam01.yaml
+# ===================================================
+
+runtime:
+  role: "skeleton_sender"       # Pi5는 YOLO skeleton 추출 + Orin 전송만 담당
+
+camera:
+  camera_id: "raspi_cam01"
+  display_name: "Pi5 Wide Camera 01"
+  room_id: "room_01"
+  backend: "picamera2"          # Pi Camera Module v3/wide v3는 libcamera/picamera2 경로 우선
+  source_mode: "device"
+  source: 0                     # /dev/video0, wide 카메라가 다른 번호면 변경
+  resolution: [640, 360]
+  processing_resolution: [640, 360]
+  fps: 30
+  loop_file: false
+  reconnect_interval_sec: 2.0
+  stream_url: ""
+
+model:
+  model_name: "yolo26s-pose"
+  model_path: "edge/models/yolo26s-pose-480.onnx"
+  backend: "onnxruntime"
+  imgsz: 480
+  inference_stride: 1
+  conf_threshold: 0.15
+  min_pose_confidence: 0.10   # 낙상/누움 탐지 드롭 방지: 0.15→0.10 (감도 확보)
+  nms_iou_threshold: 0.65
+  min_bbox_area_ratio: 0.002  # 누운 인체 소면적 허용: 0.01→0.002 (OPT-POSE-1)
+  max_people: 1               # 1인 고정: CPU 리소스 집중
+  device: null                  # Pi5 CPU 추론 (null = auto)
+  onnx_options:
+    intra_op_num_threads: 4              # Pi5 CPU 4코어 전체 풀 가동 (기존 2 →4)
+    session.intra_op.allow_spinning: "1" # 스레드 대기 모드 활성화 (기존 "0" →1)
+
+classification:
+  model_path: "edge/models/xgboost_action.json"
+  labels: ["STANDING", "SITTING", "LYING", "WALKING", "TRANSITION", "UNKNOWN"]
+  confidence_threshold: 0.45
+  track_max_age_ms: 1500
+  track_iou_threshold: 0.25
+  timeline_idle_ms: 3000
+
+trigger_thresholds:
+  prolonged_floor_lying_duration_sec: 1800
+
+room_rois: {}                   # 예: bed: [0.0, 0.0, 0.5, 1.0] normalized x1,y1,x2,y2
+
+time_context:
+  use_wall_clock_for_night_activity: false
+
+tier_classification:
+  enabled: false
+  model_path: "edge/models/xgboost_fall_binary.json"
+  meta_path: "experiments/behavior_training/reports/xgboost_fall_meta.json"
+  confidence_threshold: 0.60
+  window_frames: 12
+  min_history_frames: 3
+  default_label: "NORMAL"
+  fallback_gate:
+    enabled: true
+    require_lying_label: false
+    min_center_velocity_px_s: 35.0
+    min_abs_vertical_velocity_px_s: 50.0
+    min_high_confidence: null
+    dynamic_flags:
+      - "vertical_velocity_spike"
+      - "center_velocity_spike"
+      - "bbox_aspect_ratio_change"
+      - "coarse_label_transition"
+      - "knee_angle_collapse"
+
+sender:
+  flush_interval_sec: 1.0
+  send_empty_frames: false
+  pose_loss_fallback_enabled: true
+  pose_loss_fallback_frames: 15
+  pose_loss_fallback_max_age_ms: 900
+  pose_loss_fallback_confidence_scale: 0.5
+
+buffer:
+  save_dir: "edge/storage/buffer"
+  storage_mode: "segment_ring"
+  segment_duration_sec: 10
+  max_buffer_minutes: 30
+  danger_clip_max_duration_ms: 600000
+  codec: "mp4v"
+  index_file: "segments_index.jsonl"
+  write_enabled: false        # clip 인코딩 CPU 부하 해제 (OPT-POSE-2/3): true로 변경 시 clip 저장 재활성화
+
+stream:
+  enabled: true
+  mode: "frame_pipe"
+  output_url: "rtsp://127.0.0.1:8554/P001"
+  input_pix_fmt: "rgb24"
+  output_pix_fmt: "yuv420p"
+  rtsp_transport: "tcp"
+  encoder: "libx264"
+  preset: "ultrafast"
+  overlay_enabled: true
+  overlay_show_labels: false
+  overlay_keypoint_threshold: 0.1
+  overlay_motion_compensation: true
+  overlay_max_age_ms: 900
+  command: ""
+
+server:
+  enabled: true                 # 단독 테스트 시 --disable-server 사용
+  base_url: "http://orin:8000"
+  ws_url: "ws://orin:8000/ws/edges/{camera_id}"
+  skeleton_ws_enabled: true
+  skeleton_ws_url: "ws://orin:8000/ws/skeleton/raspi_cam01"
+  skeleton_ws_pending_file: "edge/storage/results/skeleton_ws_pending.jsonl"
+  skeleton_ws_max_pending_batches: 300
+  skeleton_ws_max_reconnect_attempts: 2
+  skeleton_ws_reconnect_backoff_initial_sec: 0.25
+  skeleton_ws_reconnect_backoff_max_sec: 2.0
+  request_timeout_sec: 10
+  upload_clip_enabled: true
+  clip_upload_path: "/api/clips/upload"
+  ingest_api_key: ""
+  ingest_api_key_env: "EDGE_INGEST_API_KEY"
+  ingest_api_key_header: "X-Edge-API-Key"
+  device_id_header: "X-Device-ID"
+  require_device_id: true
+  clip_upload_api_key: ""
+  clip_upload_api_key_env: "CLIP_UPLOAD_API_KEY"
+  clip_upload_api_key_header: "X-API-Key"
+  candidate_max_retries: 3
+
+clip_request_server:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8091
+  api_key: ""
+  api_key_env: "EDGE_CLIP_REQUEST_API_KEY"
+  api_key_header: "X-Edge-Clip-Key"
+
+privacy:
+  face_blur_enabled: true
+  face_blur_location: "orin"     # Pi5는 Orin LAN으로만 원본 clip 전송, Orin upload 단계에서 blur
+
+preprocess:
+  enabled: true
+  clahe_enabled: false
+  clahe_clip_limit: 2.0
+  clahe_tile_grid_size: 8
+  gamma: 1.0
+  brightness_warning_threshold: 70.0
+
+local_output:
+  enabled: true
+  save_dir: "edge/storage/results"
+  rotation:
+    enabled: true
+    subdir: "daily"
+    retention_days: 7
+  frames_file: "activity_frames.jsonl"
+  timeline_file: "timeline_segments.jsonl"
+  candidates_file: "candidate_windows.jsonl"
+  trigger_debug_file: "trigger_debug.jsonl"
+  perf_stats_file: "perf_stats.jsonl"
+  perf_stats_interval_sec: 30.0
+  clip_json_dir: "clip_json"
+  clip_requests_file: "edge_clip_requests.jsonl"
+  clip_results_file: "edge_clip_results.jsonl"
+  clip_upload_pending_file: "clip_upload_pending.jsonl"
