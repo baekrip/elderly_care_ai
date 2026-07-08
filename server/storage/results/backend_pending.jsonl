@@ -1,2 +1,0 @@
-{"created_at": "2026-06-23T04:45:11.599Z", "kind": "events_batch", "url": "/api/v1/events/batch", "payload": {"events": [{"event_type": "abnormal_posture", "id": 1}]}, "response_status": 500, "response_text": "fail"}
-{"created_at": "2026-06-23T04:55:15.297Z", "kind": "events_batch", "url": "/api/v1/events/batch", "payload": {"events": [{"event_type": "abnormal_posture", "id": 1}]}, "response_status": 500, "response_text": "fail"}
