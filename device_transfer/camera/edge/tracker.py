@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 @dataclass
@@ -26,9 +27,17 @@ def _iou(box_a: list[int], box_b: list[int]) -> float:
 
 
 class SimpleTracker:
-    def __init__(self, max_age_ms: int = 1_500, iou_threshold: float = 0.25) -> None:
+    def __init__(
+        self,
+        max_age_ms: int = 1_500,
+        iou_threshold: float = 0.25,
+        max_center_shift_ratio: float = 0.75,
+        max_area_ratio: float = 2.5,
+    ) -> None:
         self.max_age_ms = max_age_ms
         self.iou_threshold = iou_threshold
+        self.max_center_shift_ratio = max(0.0, float(max_center_shift_ratio))
+        self.max_area_ratio = max(1.0, float(max_area_ratio))
         self._next_id = 1
         self._tracks: dict[int, TrackState] = {}
 
@@ -44,8 +53,14 @@ class SimpleTracker:
                 if track_id in used:
                     continue
                 score = _iou(box, track.bbox)
-                if score > best_score:
-                    best_score = score
+                if score >= self.iou_threshold:
+                    candidate_score = score
+                elif self._plausible_continuation(box, track.bbox):
+                    candidate_score = self.iou_threshold
+                else:
+                    continue
+                if candidate_score > best_score:
+                    best_score = candidate_score
                     best_track = track_id
 
             if best_track is not None and best_score >= self.iou_threshold:
@@ -60,6 +75,43 @@ class SimpleTracker:
             assignments.append(track_id)
             used.add(track_id)
         return assignments
+
+    def _plausible_continuation(
+        self,
+        current_box: list[int],
+        previous_box: list[int],
+    ) -> bool:
+        previous_width = max(1, previous_box[2] - previous_box[0])
+        previous_height = max(1, previous_box[3] - previous_box[1])
+        current_width = max(1, current_box[2] - current_box[0])
+        current_height = max(1, current_box[3] - current_box[1])
+        previous_center = (
+            (previous_box[0] + previous_box[2]) / 2.0,
+            (previous_box[1] + previous_box[3]) / 2.0,
+        )
+        current_center = (
+            (current_box[0] + current_box[2]) / 2.0,
+            (current_box[1] + current_box[3]) / 2.0,
+        )
+        center_distance = math.hypot(
+            current_center[0] - previous_center[0],
+            current_center[1] - previous_center[1],
+        )
+        reference_extent = max(
+            previous_width,
+            previous_height,
+            current_width,
+            current_height,
+        )
+        if center_distance > self.max_center_shift_ratio * reference_extent:
+            return False
+        previous_area = previous_width * previous_height
+        current_area = current_width * current_height
+        area_ratio = max(previous_area, current_area) / max(
+            min(previous_area, current_area),
+            1,
+        )
+        return area_ratio <= self.max_area_ratio
 
     def _prune(self, timestamp_ms: int) -> None:
         expired = [track_id for track_id, state in self._tracks.items() if timestamp_ms - state.timestamp_ms > self.max_age_ms]

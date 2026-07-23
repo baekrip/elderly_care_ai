@@ -61,6 +61,8 @@ async def submit_candidates(
             ["DROP", "FALL", "GRADUAL_FALL", "LOSS_OF_BALANCE", "POST_FALL_IMMOBILITY"],
         )
     }
+    deployment_config = request.app.state.config.get("deployment", {}) or {}
+    alerts_enabled = bool(deployment_config.get("alerts_enabled", True))
 
     results: list[dict[str, object]] = []
     archive.write_candidate_request(batch.model_dump(mode="json"))
@@ -141,7 +143,7 @@ async def submit_candidates(
         )
 
         clip_requested = False
-        if effective_level == "danger":
+        if effective_level == "danger" and alerts_enabled:
             clip_request = ClipRequestEvent(
                 event_id=event_id,
                 camera_id=window.camera_id,
@@ -165,7 +167,7 @@ async def submit_candidates(
 
         backend_result: dict[str, object] | None = None
         backend_cfg = config_from_project_config(request.app.state.config)
-        if backend_cfg.enabled and should_forward_level(effective_level):
+        if alerts_enabled and backend_cfg.enabled and should_forward_level(effective_level):
             backend_event = build_candidate_backend_event(
                 device_key=window.device_id or window.camera_id,
                 patient_id=str(request.app.state.config.get("patient", {}).get("patient_id", "P001")),
@@ -194,18 +196,35 @@ async def submit_candidates(
             event_queued = False
             batch_forwarded = 0
             if effective_level in {"danger", "normal"}:
-                event_response = forwarder.post_events_batch([backend_event])
-                if is_retryable_response(event_response):
-                    append_pending(
-                        backend_cfg.pending_file,
-                        kind="events_batch",
-                        url=backend_cfg.events_batch_url,
-                        payload={"events": [backend_event]},
-                        response=event_response,
+                batcher = (
+                    getattr(request.app.state, "backend_normal_batcher", None)
+                    if effective_level == "normal"
+                    else None
+                )
+                if batcher is not None:
+                    submit_result = batcher.submit(backend_event)
+                    event_response = submit_result.response
+                    pending_replay = submit_result.pending_replay
+                    event_queued = submit_result.response is None
+                    batch_forwarded = submit_result.forwarded
+                    ref_event_id = (
+                        extract_first_event_id(event_response.json_body)
+                        if event_response
+                        else None
                     )
-                pending_replay = forwarder.retry_pending() if event_response.ok else None
-                ref_event_id = extract_first_event_id(event_response.json_body)
-                batch_forwarded = 1 if event_response.ok else 0
+                else:
+                    event_response = forwarder.post_events_batch([backend_event])
+                    if is_retryable_response(event_response):
+                        append_pending(
+                            backend_cfg.pending_file,
+                            kind="events_batch",
+                            url=backend_cfg.events_batch_url,
+                            payload={"events": [backend_event]},
+                            response=event_response,
+                        )
+                    pending_replay = forwarder.retry_pending() if event_response.ok else None
+                    ref_event_id = extract_first_event_id(event_response.json_body)
+                    batch_forwarded = 1 if event_response.ok else 0
             else:
                 batcher = getattr(request.app.state, "backend_event_batcher", None)
                 if batcher is None:
@@ -282,6 +301,7 @@ async def submit_candidates(
                 "capture_ts": capture_ts,
                 "analysis_ts": analysis_ts,
                 "clip_requested": clip_requested,
+                "alerts_enabled": alerts_enabled,
                 "backend_forward": backend_result,
                 "window_start_ts_ms": start_ts_ms,
                 "window_end_ts_ms": end_ts_ms,

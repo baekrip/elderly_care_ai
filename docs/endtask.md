@@ -7,9 +7,9 @@
 
 ## 문서 정보
 - 문서명: `endtask.md`
-- 현재 버전: `v2.8`
+- 현재 버전: `v2.10`
 - 역할: `목표/성능/기능 참고용`
-- 최종 수정: 2026-06-08 03:20 (XGBoost와 ST-GCN 병렬 동시 구동 및 가중치 융합 모델 최종 반영, 조건부 프리필터 가동 정책 공식 폐기)
+- 최종 수정: 2026-07-10 18:00 (현재 ultragoal 범위에서 SAM/SAM3 자동 마스크 생성을 제외하고, 별도 승인 후 지원 항목으로 정리)
 
 ## 1. 프로젝트 목표
 
@@ -44,9 +44,15 @@
 - OpenCV 기반의 카메라 환경 보정, 전처리, ROI 전략을 적용할 수 있어야 한다.
 
 ### 2.3 행동 분류 품질 요구
-- 단순히 `서있음`, `앉음`, `누움`처럼 하나의 상태만으로 분류하지 않고, 필요 시 여러 상태를 결합한 복합 행동 분류로 확장할 수 있어야 한다.
-- 24시간 생활 패턴 분석을 위해 정상 행동도 `NORMAL` 단일 라벨로만 저장하지 않는다.
-- 정상 행동은 최소한 `standing`, `walking`, `sitting`, `sitting_down`, `standing_up`, `lying_rest`, `no_move_short`처럼 세분화되어야 한다.
+- 현재 캡스톤 범위에서는 `standing`, `sitting`, `walking`, `lying`, `room_exit`, `sleeping`, `fall_down`, `no_move_long` 8개 단순 행동 추론을 목표로 한다.
+- 24시간 생활 패턴 분석을 위해 가능한 경우 `NORMAL` 단일 라벨만 저장하지 않고, 위 8개 행동 라벨 중 검증된 라벨을 함께 저장한다.
+- `near_fall`, `stumble`, `sitting_down`, `standing_up`, `bending_long`, `loss_of_balance` 등 난이도가 높은 세부 라벨은 현재 캡스톤 범위에서 제외한다.
+- `no_move_long` 10시간 조건은 1차 검증에서 실제 10시간을 기다리지 않고, `capture_ts`를 10시간 경과한 것처럼 수정한 timestamp-compressed replay fixture로 확인한다. 실제 10시간 연속 검증은 최종 실기기 안정화 뒤에 진행한다.
+- `room_exit`는 Door ROI 통과 후 사람이 보이지 않는 no-person 상태가 5초 지속되면 확정한다. 순간 pose-lost 오탐이 확인되면 10초로 늘린다.
+- `fall_down`과 `lying`이 충돌하면 `fall_down > lying` 순서로 판정한다. `sleeping`은 Bed ROI 정상휴식으로 먼저 처리하고 10시간 이상 지속되면 `no_move_long`으로 전이한다. `room_exit`은 Door ROI 통과 후 no-person 기준으로 별도 판정한다.
+- 현재 ultragoal 실행 범위에서는 SAM/SAM3 자동 마스크 생성, SAM 마스크 튜닝, 사진/영상 의존 검증을 진행하지 않는다.
+- Floor, Bed/Sofa, Door 후보 ROI를 SAM/SAM3로 생성하는 기능은 향후 지원 항목이다. 실행하려면 별도 승인과 Pi5 실제 설치 위치 기준 빈 방 사진 및 검증 영상 확보가 필요하다.
+- `mask_map.json` 생성, 재사용, 재생성 명령 적용, `pending_review` 처리, `sam.required_rois` 적용은 현재 ultragoal의 구현/검증 요구가 아니라 별도 승인 후 재개할 deferred support 범위다.
 - 이상/위험/낙상 판단은 정상 행동 흐름에서 벗어나는 전이와 지속 시간을 함께 사용해야 한다.
 - 예:
   - `식사중 = 앉음 + 손 행동 + 식탁 영역`
@@ -97,15 +103,15 @@
 
 | 계층 | 목표 라벨 | 사용 목적 |
 |------|-----------|-----------|
-| 정상 일상 | `standing`, `walking`, `sitting`, `sitting_down`, `standing_up`, `lying_rest`, `no_move_short` | 24시간 타임라인, 하루/주간 생활 패턴 분석 |
-| 이상/주의 | `no_move_long`, `bending_long`, `lying_on_floor_uncertain`, `out_of_frame_abnormal`, `unstable_sit_to_stand` | 평소와 다른 패턴 감지, 보호자 확인 후보 |
-| 위험 전조 | `near_fall`, `stumble`, `loss_of_balance`, `sudden_drop`, `floor_prone_candidate` | 낙상 전조/자가회복/비틀거림 감지 |
-| 낙상 | `fall_candidate`, `fall_confirmed`, `fall_then_no_move`, `collapse_out_of_frame` | 즉시 알림, 위험 clip 요청, 보호자 확인 |
+| 정상 일상 | `standing`, `walking`, `sitting`, `lying`, `sleeping` | 24시간 타임라인, 하루/주간 생활 패턴 분석 |
+| 상황 인지 | `room_exit`, `no_move_long` | 외출/방 이탈, 장시간 무동작 확인 후보 |
+| 낙상 | `fall_down` | 즉시 알림, 위험 clip 요청, 보호자 확인 |
+| 현재 범위 제외 | `near_fall`, `stumble`, `sitting_down`, `standing_up`, `bending_long`, `loss_of_balance`, `sudden_drop`, `floor_prone_candidate` | 난이도와 검증 범위 과다로 현재 캡스톤에서는 제외 |
 
 운영 기준:
 - `NORMAL 단일 라벨로만 저장하지 않는다`.
-- 위험 알림은 세부 행동 라벨과 `NORMAL/ABNORMAL/DANGER` 레벨을 함께 사용한다.
-- 라벨 재학습 전까지는 기존 모델 출력과 fallback 라벨을 그대로 유지하되, 신규 라벨 학습/검증 계획은 `docs/구성.md`에서 승인받은 뒤 적용한다.
+- 위험 알림은 8개 행동 라벨과 `NORMAL/ABNORMAL/DANGER` 레벨을 함께 사용한다.
+- 라벨 재학습 전까지는 기존 모델 출력과 fallback 라벨을 그대로 유지하되, 현재 캡스톤 범위 밖 세부 라벨은 신규 학습/검증 대상으로 진행하지 않는다.
 
 ### 3.4 위험 상황 발생 시 영상 저장 및 전송
 - 엣지(Jetson Orin Nano)가 위험 상황으로 분류하면, 해당 타임라인 시점과 연결되는 위험 상황 당시의 영상 `3분`을 확보할 수 있어야 한다.
@@ -117,6 +123,7 @@
   - 현재 기준: 위험 시점 전후 기본 `3분`을 확보하고, 장시간 미활동/누움 같은 특수 상황에서도 `10분`을 넘기지 않는다.
   - 구현 방식은 장비(Raspberry Pi 5 / Jetson Orin Nano)의 RAM/저장 용량과 실기기 FPS를 기준으로 `segment_ring` 또는 링 버퍼 계열로 조정한다.
 - **[2026-05-29 변경]** 위험 clip은 Pi5에서 `segment_ring` 방식으로 임시 보관하고, Orin이 위험 timestamp를 기준으로 REST 요청을 보내면 Pi5가 해당 구간을 export해 Orin으로 전송한다. 운영 기준에서 Pi5는 외부 백엔드/미디어 서버로 직접 위험 clip을 업로드하지 않고, Orin이 face blur 적용 또는 검증 후 서버 업로드를 담당한다.
+- **[2026-07-10 변경]** 1차 재활성화 범위는 Pi5 `segment_ring` 파일 쓰기다. `device_transfer/camera/edge/config.raspi_cam01*.yaml`의 `buffer.write_enabled`를 `true`로 둔다. 스트리밍 딜레이가 과도하면 재검토한다.
 
 ## 3.5 기기 구성 및 통신 방식 (2026-05-27 최신 기준)
 

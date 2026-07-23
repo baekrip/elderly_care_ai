@@ -4,7 +4,7 @@
 # ===========================================
 
 # --- AI 추론 ---
-ultralytics>=8.3.0          # YOLO pose inference
+ultralytics>=8.3.237        # YOLO pose and SAM3 integration
 onnxruntime>=1.17.0         # Optional ONNX runtime for future RTMPose fallback
 xgboost>=2.1.0              # 1st-stage action classifier
 

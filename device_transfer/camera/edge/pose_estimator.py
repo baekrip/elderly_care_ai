@@ -6,7 +6,14 @@ import time
 from typing import Any
 
 import numpy as np
-from ultralytics import YOLO
+
+try:
+    from ultralytics import YOLO as _YOLO
+    _ULTRALYTICS_IMPORT_ERROR: Exception | None = None
+except (ImportError, RuntimeError) as exc:
+    _YOLO = None
+    _ULTRALYTICS_IMPORT_ERROR = exc
+YOLO: Any = _YOLO
 
 try:
     import onnxruntime as ort
@@ -26,8 +33,11 @@ def build_onnx_session_options(options: dict[str, Any] | None) -> Any | None:
     if not options:
         return None
     thread_count = options.get("intra_op_num_threads")
-    if thread_count is not None and int(thread_count) not in {1, 2, 4}:
-        raise ValueError("intra_op_num_threads must be one of 1, 2, or 4")
+    if thread_count is not None and int(thread_count) not in {1, 2, 4, 8}:
+        raise ValueError("intra_op_num_threads must be one of 1, 2, 4, or 8")
+    inter_thread_count = options.get("inter_op_num_threads")
+    if inter_thread_count is not None and int(inter_thread_count) not in {1, 2, 4}:
+        raise ValueError("inter_op_num_threads must be one of 1, 2, or 4")
     allow_spinning = options.get("session.intra_op.allow_spinning")
     if allow_spinning is not None and str(allow_spinning) not in {"0", "1"}:
         raise ValueError("session.intra_op.allow_spinning must be '0' or '1'")
@@ -37,16 +47,18 @@ def build_onnx_session_options(options: dict[str, Any] | None) -> Any | None:
     session_options = ort.SessionOptions()
     if thread_count is not None:
         session_options.intra_op_num_threads = int(thread_count)
+    if inter_thread_count is not None:
+        session_options.inter_op_num_threads = int(inter_thread_count)
     graph_level = options.get("graph_optimization_level")
     if graph_level is not None:
         if str(graph_level) != "ORT_ENABLE_ALL":
             raise ValueError("graph_optimization_level must be ORT_ENABLE_ALL")
-        session_options.graph_optimization_level = ort.ORT_ENABLE_ALL
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     execution_mode = options.get("execution_mode")
     if execution_mode is not None:
         if str(execution_mode) != "ORT_SEQUENTIAL":
             raise ValueError("execution_mode must be ORT_SEQUENTIAL")
-        session_options.execution_mode = ort.ORT_SEQUENTIAL
+        session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     if allow_spinning is not None:
         session_options.add_session_config_entry("session.intra_op.allow_spinning", str(allow_spinning))
     if bool(options.get("enable_profiling", False)):
@@ -238,6 +250,8 @@ class YoloPoseEstimator:
                 )
             self._onnx_input_name = self._onnx_session.get_inputs()[0].name
         else:
+            if YOLO is None:
+                raise RuntimeError("ultralytics backend is unavailable") from _ULTRALYTICS_IMPORT_ERROR
             self.model = YOLO(str(self.model_path))
 
     def predict(self, frame: np.ndarray) -> list[PoseDetection]:

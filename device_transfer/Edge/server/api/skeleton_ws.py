@@ -72,8 +72,23 @@ def _forward_events_to_backend(websocket: WebSocket, events: list[dict[str, Any]
         return []
     config = getattr(websocket.app.state, "config", {}) or {}
     backend = config.get("backend", {}) if isinstance(config, dict) else {}
+    deployment = config.get("deployment", {}) if isinstance(config, dict) else {}
+    alerts_enabled = bool(deployment.get("alerts_enabled", True)) if isinstance(deployment, dict) else True
     if not bool(backend.get("enabled", False)):
         return []
+    if not alerts_enabled:
+        return [
+            {
+                "local_event_id": event.get("event_id"),
+                "event_forwarded": False,
+                "event_queued": False,
+                "batch_forwarded": 0,
+                "event_status_code": 0,
+                "delivery_suppressed": True,
+                "suppression_reason": "shadow_mode",
+            }
+            for event in _latest_events_by_local_event_id(events)
+        ]
     batcher = getattr(websocket.app.state, "backend_event_batcher", None)
     if batcher is None:
         return []
@@ -165,7 +180,10 @@ def _build_backend_event_from_skeleton_event(config: dict[str, Any], event: dict
     model_outputs = event.get("model_outputs")
     
     if fall_only_mode:
-        is_fall = source_label in {"fall_detected", "FALL", "DROP", "GRADUAL_FALL"}
+        is_fall = (
+            not bool(event.get("delivery_suppressed", False))
+            and _temporal_decision_result(event) == "fall"
+        )
         if not is_fall:
             source_label = "NORMAL"
             severity = 0
@@ -174,21 +192,12 @@ def _build_backend_event_from_skeleton_event(config: dict[str, Any], event: dict
             risk_score = 1
             if isinstance(model_outputs, dict):
                 model_outputs = dict(model_outputs)
-                if "fusion" in model_outputs:
-                    model_outputs["fusion"]["final_label"] = "normal"
-                    model_outputs["fusion"]["final_fall_probability"] = 0.0
-                if "xgboost" in model_outputs:
-                    model_outputs["xgboost"]["label"] = "NORMAL"
-                    model_outputs["xgboost"]["probability"] = 1.0
-                if "stgcn" in model_outputs and isinstance(model_outputs["stgcn"], dict):
-                    model_outputs["stgcn"]["label"] = "NORMAL"
-                    model_outputs["stgcn"]["probability"] = 1.0
 
     return build_backend_event(
         device_key=str(backend.get("device_key") or event.get("camera_id") or ""),
         patient_id=str(patient.get("patient_id", "P001")),
         source_label=source_label,
-        confidence=_event_risk_confidence(event) if severity >= 90 else 1.0,
+        confidence=_event_risk_confidence(event),
         severity=severity,
         timestamp_ms=int(event.get("timestamp_ms") or 0),
         frame_id=event.get("frame_id"),
@@ -204,6 +213,9 @@ def _build_backend_event_from_skeleton_event(config: dict[str, Any], event: dict
             "raw_score": event.get("raw_score"),
             "vote_ratio": event.get("vote_ratio"),
             "model_outputs": model_outputs,
+            "temporal_decision": event.get("temporal_decision"),
+            "activity_diagnostics": event.get("activity_diagnostics"),
+            "delivery_suppressed": bool(event.get("delivery_suppressed", False)),
         },
     )
 
@@ -225,12 +237,16 @@ def _normalize_external_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _source_label_for_backend(event: dict[str, Any]) -> str:
-    model_outputs = event.get("model_outputs")
-    if isinstance(model_outputs, dict):
-        fusion = model_outputs.get("fusion")
-        if isinstance(fusion, dict) and fusion.get("final_label"):
-            return str(fusion["final_label"])
+    if _temporal_decision_result(event) == "fall":
+        return "fall_detected"
     return str(event.get("event_type") or event.get("risk_label") or "abnormal_posture")
+
+
+def _temporal_decision_result(event: dict[str, Any]) -> str:
+    decision = event.get("temporal_decision")
+    if isinstance(decision, dict):
+        return str(decision.get("result") or "").lower()
+    return ""
 
 
 def _severity_for_event(event: dict[str, Any]) -> int:

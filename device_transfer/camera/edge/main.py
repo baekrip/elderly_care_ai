@@ -30,6 +30,8 @@ from edge.tracker import SimpleTracker
 from edge.trigger_engine import TriggerEngine
 from edge.video_buffer import RollingVideoBuffer
 from edge.ws_sender import SkeletonWebSocketSender
+from tools.roi_bootstrap import BootRoiBootstrap
+from tools.manual_roi_store import ManualRoiError, load_manual_room_rois
 from shared.protocol import (
     ActivityFrame,
     ActivityFrameBatch,
@@ -205,6 +207,8 @@ def _apply_processing_resolution(frame: Any, config: dict[str, Any]) -> tuple[An
     import cv2
 
     width, height = int(processing_resolution[0]), int(processing_resolution[1])
+    if frame.shape[1] == width and frame.shape[0] == height:
+        return frame, {"processing_resolution": [width, height]}
     resized = cv2.resize(frame, (width, height))
     return resized, {"processing_resolution": [width, height]}
 
@@ -248,6 +252,20 @@ def _build_perf_stats_row(
     worker_busy_skip_count: int | None = None,
     worker_submit_count: int | None = None,
     worker_result_count: int | None = None,
+    worker_queue_depth: int | None = None,
+    worker_coalesce_count: int | None = None,
+    worker_drop_count: int | None = None,
+    worker_stale_result_count: int | None = None,
+    capture_frames: int | None = None,
+    inference_submitted: int | None = None,
+    submit_skipped_busy: int | None = None,
+    overwritten: int | None = None,
+    transport_dropped: int | None = None,
+    out_of_order_rejected: int | None = None,
+    stale_rejected: int | None = None,
+    inference_completed: int | None = None,
+    capture_to_analysis_age_ms: list[float] | None = None,
+    pose_loss_fallback_count: int | None = None,
     source_resolution: list[int] | None = None,
     stream_resolution: list[int] | None = None,
     processing_resolution: list[int] | None = None,
@@ -269,6 +287,7 @@ def _build_perf_stats_row(
     pose_latency_ms = pose_latency_ms or []
     loop_latency_ms = loop_latency_ms or []
     frame_interval_ms = frame_interval_ms or []
+    capture_to_analysis_age_ms = capture_to_analysis_age_ms or []
     row: dict[str, Any] = {
         "camera_id": camera_id,
         "recorded_at": utc_iso_now(),
@@ -288,6 +307,13 @@ def _build_perf_stats_row(
         "loop_avg_ms": _round_mean(loop_latency_ms),
         "loop_p95_ms": _round_p95(loop_latency_ms),
         "frame_interval_p95_ms": _round_p95(frame_interval_ms),
+        "capture_to_analysis_age_avg_ms": _round_mean(capture_to_analysis_age_ms),
+        "capture_to_analysis_age_p50_ms": _round_percentile(capture_to_analysis_age_ms, 0.50),
+        "capture_to_analysis_age_p95_ms": _round_p95(capture_to_analysis_age_ms),
+        "capture_to_analysis_age_p99_ms": _round_percentile(capture_to_analysis_age_ms, 0.99),
+        "capture_to_analysis_age_max_ms": round(max(capture_to_analysis_age_ms), 4)
+        if capture_to_analysis_age_ms
+        else 0.0,
     }
     for key, values in (stage_metrics_ms or {}).items():
         row[key] = _round_mean(values)
@@ -299,6 +325,32 @@ def _build_perf_stats_row(
         row["worker_submit_count"] = int(worker_submit_count)
     if worker_result_count is not None:
         row["worker_result_count"] = int(worker_result_count)
+    if worker_queue_depth is not None:
+        row["worker_queue_depth"] = int(worker_queue_depth)
+    if worker_coalesce_count is not None:
+        row["worker_coalesce_count"] = int(worker_coalesce_count)
+    if worker_drop_count is not None:
+        row["worker_drop_count"] = int(worker_drop_count)
+    if worker_stale_result_count is not None:
+        row["worker_stale_result_count"] = int(worker_stale_result_count)
+    if capture_frames is not None:
+        row["capture_frames"] = int(capture_frames)
+    if inference_submitted is not None:
+        row["inference_submitted"] = int(inference_submitted)
+    if submit_skipped_busy is not None:
+        row["submit_skipped_busy"] = int(submit_skipped_busy)
+    if overwritten is not None:
+        row["overwritten"] = int(overwritten)
+    if transport_dropped is not None:
+        row["transport_dropped"] = int(transport_dropped)
+    if out_of_order_rejected is not None:
+        row["out_of_order_rejected"] = int(out_of_order_rejected)
+    if stale_rejected is not None:
+        row["stale_rejected"] = int(stale_rejected)
+    if inference_completed is not None:
+        row["inference_completed"] = int(inference_completed)
+    if pose_loss_fallback_count is not None:
+        row["pose_loss_fallback_count"] = int(pose_loss_fallback_count)
     if source_resolution is not None:
         row["source_resolution"] = [int(value) for value in source_resolution]
     if stream_resolution is not None:
@@ -317,10 +369,15 @@ def _round_mean(values: list[float]) -> float:
 
 
 def _round_p95(values: list[float]) -> float:
+    return _round_percentile(values, 0.95)
+
+
+def _round_percentile(values: list[float], percentile: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(float(value) for value in values)
-    index = max(0, min(len(ordered) - 1, int(0.95 * len(ordered) + 0.999999) - 1))
+    bounded_percentile = min(1.0, max(0.0, float(percentile)))
+    index = max(0, min(len(ordered) - 1, int(bounded_percentile * len(ordered) + 0.999999) - 1))
     return round(ordered[index], 4)
 
 
@@ -559,6 +616,36 @@ def apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
     return config
 
 
+def load_manual_rois_from_config(config: dict[str, Any]) -> bool:
+    manual_config = config.get("manual_roi", {}) or {}
+    if not bool(manual_config.get("enabled", False)):
+        return False
+    state_path = Path(str(manual_config.get("state_path", "edge/storage/roi/manual_roi_state.json")))
+    try:
+        room_rois = load_manual_room_rois(state_path)
+    except ManualRoiError as exc:
+        LOGGER.warning("manual ROI state is invalid: %s", exc)
+        return False
+    if room_rois is None:
+        LOGGER.warning("manual ROI review is pending: %s", state_path)
+        return False
+    config["room_rois"] = room_rois
+    LOGGER.info("manual ROI map ready: %s", state_path)
+    return True
+
+
+def enforce_roi_context(config: dict[str, Any], *, manual_rois_ready: bool, roi_bootstrap_enabled: bool) -> None:
+    manual_config = config.get("manual_roi", {}) or {}
+    if (
+        bool(manual_config.get("enabled", False))
+        and bool(manual_config.get("fail_closed", True))
+        and not manual_rois_ready
+        and not roi_bootstrap_enabled
+    ):
+        state_path = str(manual_config.get("state_path", "edge/storage/roi/manual_roi_state.json"))
+        raise RuntimeError(f"manual ROI review is required before runtime start: {state_path}")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     args = build_parser().parse_args()
@@ -575,8 +662,14 @@ def main() -> None:
     tracker = SimpleTracker(
         max_age_ms=int(config["classification"].get("track_max_age_ms", 1500)),
         iou_threshold=float(config["classification"].get("track_iou_threshold", 0.25)),
+        max_center_shift_ratio=float(
+            config["classification"].get("track_max_center_shift_ratio", 0.75)
+        ),
+        max_area_ratio=float(
+            config["classification"].get("track_max_area_ratio", 2.5)
+        ),
     )
-    feature_extractor = FeatureExtractor(config.get("room_rois", {}))
+    roi_bootstrap = BootRoiBootstrap(config)
     classifier = None if skeleton_sender_role else ActionClassifier(config)
     tier_classifier = None if skeleton_sender_role else TierClassifier(config)
     trigger_engine = None if skeleton_sender_role else TriggerEngine(config)
@@ -613,6 +706,16 @@ def main() -> None:
     last_candidate_sent_ms: dict[tuple[int, str], int] = {}
 
     camera.open()
+    manual_rois_ready = load_manual_rois_from_config(config)
+    enforce_roi_context(config, manual_rois_ready=manual_rois_ready, roi_bootstrap_enabled=roi_bootstrap.enabled)
+    first_packet = None
+    if not manual_rois_ready and roi_bootstrap.enabled:
+        first_packet = camera.read()
+        if first_packet is None:
+            raise RuntimeError("SAM3 ROI bootstrap could not read the first camera frame")
+        config["room_rois"] = roi_bootstrap.ensure(first_packet.frame)
+        LOGGER.info("SAM3 boot ROI map ready: %s", roi_bootstrap.output_path)
+    feature_extractor = FeatureExtractor(config.get("room_rois", {}))
     streamer.start()
     event_listener.start()
     if clip_rest_server is not None:
@@ -663,10 +766,18 @@ def main() -> None:
     perf_pose_latency_ms: list[float] = []
     perf_loop_latency_ms: list[float] = []
     perf_frame_interval_ms: list[float] = []
+    perf_capture_to_analysis_age_ms: list[float] = []
+    perf_transport_dropped = 0
+    perf_out_of_order_rejected = 0
+    perf_stale_rejected = 0
+    perf_pose_loss_fallback_count = 0
     perf_last_frame_started_at: float | None = None
     target_fps = float(config["camera"].get("fps", 0.0) or 0.0)
     inference_stride = max(1, int(config.get("model", {}).get("inference_stride", 1) or 1))
     pose_worker = LatestPoseInferenceWorker(_run_pose_inference)
+    worker_window_baseline = pose_worker.telemetry_snapshot()
+    latest_pose_request_id = 0
+    last_accepted_pose_request_id = 0
     stream_overlay_max_age_ms = max(0, int(config.get("stream", {}).get("overlay_max_age_ms", 500) or 0))
     latest_stream_overlays: list[dict[str, Any]] = []
     latest_stream_overlay_ts_ms = 0
@@ -689,11 +800,16 @@ def main() -> None:
                 LOGGER.info("max_frames reached: %s", args.max_frames)
                 break
 
-            packet = camera.read()
+            if first_packet is not None:
+                packet = first_packet
+                first_packet = None
+            else:
+                packet = camera.read()
             if packet is None:
                 if camera.exhausted:
                     LOGGER.info("input source exhausted")
                     break
+                perf_transport_dropped += 1
                 time.sleep(0.05)
                 continue
 
@@ -711,16 +827,33 @@ def main() -> None:
                 pose_result = pose_worker.poll()
             except Exception as exc:
                 LOGGER.warning("pose inference failed: %s", exc)
+            if pose_result is not None:
+                pose_request_id = int(pose_result.context.get("pose_request_id", 0))
+                if pose_request_id <= last_accepted_pose_request_id:
+                    perf_out_of_order_rejected += 1
+                    pose_result = None
+                elif pose_request_id < latest_pose_request_id:
+                    perf_stale_rejected += 1
+                    pose_result = None
+                else:
+                    capture_monotonic_s = float(pose_result.context.get("capture_monotonic_s", frame_started_at))
+                    perf_capture_to_analysis_age_ms.append(
+                        max(0.0, (time.perf_counter() - capture_monotonic_s) * 1000.0)
+                    )
+                    last_accepted_pose_request_id = pose_request_id
 
             run_inference = processed_frames % inference_stride == 0
             if run_inference:
+                latest_pose_request_id += 1
                 pose_worker.submit(
                     {
                         "packet": packet,
                         "frame_ref": current_frame_ref,
                         "capture_ts": capture_ts,
+                        "capture_monotonic_s": frame_started_at,
+                        "pose_request_id": latest_pose_request_id,
                     },
-                    packet.frame.copy(),
+                    packet.frame,
                     config,
                     preprocessor,
                     pose_estimator,
@@ -889,6 +1022,7 @@ def main() -> None:
                             )
                         )
                         pose_loss_fallback_count += 1
+                        perf_pose_loss_fallback_count += 1
 
             if streamer.overlay_enabled and processed_people:
                 latest_stream_overlays = processed_people
@@ -901,7 +1035,11 @@ def main() -> None:
                     if latest_stream_overlays and 0 <= overlay_age_ms <= stream_overlay_max_age_ms
                     else []
                 )
-                streamer.write_frame(stream_packet.frame, active_overlays)
+                streamer.write_frame(
+                    stream_packet.frame,
+                    active_overlays,
+                    fresh_pose_result=bool(processed_people),
+                )
             else:
                 streamer.write_frame(stream_packet.frame)
 
@@ -1027,6 +1165,7 @@ def main() -> None:
             now = time.time()
             perf_loop_latency_ms.append((time.perf_counter() - loop_started_at) * 1000.0)
             if perf_interval_sec > 0 and now - perf_window_started_at >= perf_interval_sec:
+                worker_telemetry = pose_worker.telemetry_snapshot()
                 local_perf_stats_batch.append(
                     _build_perf_stats_row(
                         camera_id=config["camera"]["camera_id"],
@@ -1041,8 +1180,33 @@ def main() -> None:
                         pose_latency_ms=perf_pose_latency_ms,
                         loop_latency_ms=perf_loop_latency_ms,
                         frame_interval_ms=perf_frame_interval_ms,
+                        capture_to_analysis_age_ms=perf_capture_to_analysis_age_ms,
+                        worker_busy_skip_count=worker_telemetry.submit_skipped_busy
+                        - worker_window_baseline.submit_skipped_busy,
+                        worker_submit_count=worker_telemetry.inference_submitted
+                        - worker_window_baseline.inference_submitted,
+                        worker_result_count=worker_telemetry.inference_completed
+                        - worker_window_baseline.inference_completed,
+                        worker_queue_depth=worker_telemetry.queue_depth,
+                        worker_coalesce_count=worker_telemetry.submit_skipped_busy
+                        - worker_window_baseline.submit_skipped_busy,
+                        worker_drop_count=worker_telemetry.overwritten - worker_window_baseline.overwritten,
+                        worker_stale_result_count=perf_stale_rejected,
+                        capture_frames=perf_frame_count,
+                        inference_submitted=worker_telemetry.inference_submitted
+                        - worker_window_baseline.inference_submitted,
+                        submit_skipped_busy=worker_telemetry.submit_skipped_busy
+                        - worker_window_baseline.submit_skipped_busy,
+                        overwritten=worker_telemetry.overwritten - worker_window_baseline.overwritten,
+                        transport_dropped=perf_transport_dropped,
+                        out_of_order_rejected=perf_out_of_order_rejected,
+                        stale_rejected=perf_stale_rejected,
+                        inference_completed=worker_telemetry.inference_completed
+                        - worker_window_baseline.inference_completed,
+                        pose_loss_fallback_count=perf_pose_loss_fallback_count,
                     )
                 )
+                worker_window_baseline = worker_telemetry
                 perf_window_started_at = now
                 perf_frame_count = 0
                 perf_pose_confidence_sum = 0.0
@@ -1052,6 +1216,11 @@ def main() -> None:
                 perf_pose_latency_ms = []
                 perf_loop_latency_ms = []
                 perf_frame_interval_ms = []
+                perf_capture_to_analysis_age_ms = []
+                perf_transport_dropped = 0
+                perf_out_of_order_rejected = 0
+                perf_stale_rejected = 0
+                perf_pose_loss_fallback_count = 0
 
             if time.time() - last_flush >= flush_interval:
                 try:

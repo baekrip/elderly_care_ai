@@ -86,10 +86,8 @@ class Pi5SkeletonPipeline:
             confirm_after_ms=int(config.get("events", {}).get("confirm_after_ms", 30_000)),
             resolve_after_ms=int(config.get("events", {}).get("resolve_after_ms", 5_000)),
         )
-        # [TEMP] fall_only_mode: true 이면 fall_detected 외 비정상자세 이벤트를 정상으로 억제
-        # 복구 방법: config.orin.yaml 의 events.fall_only_mode 를 false 로 변경 후 서비스 재시작
+        # Keep the legacy output filter for normal mode, but never rewrite raw model diagnostics.
         self.fall_only_mode: bool = bool(config.get("events", {}).get("fall_only_mode", False))
-        self._fall_only_allowed: frozenset[str] = frozenset({"fall_detected", "normal_activity", "normal_activity_summary", "lying_down", "abnormal_posture"})
         # 정상(NORMAL) 상태 하트비트 전송 주기 설정
         # 평시 완전 정상 상태에서도 10초에 1번씩 normal_activity_summary 이벤트를 전송하여
         # 위험점수 평균 계산 시 분모(모수) 왜곡을 방지하고 "모든 행동 추론" 목적을 충족시킴
@@ -115,31 +113,8 @@ class Pi5SkeletonPipeline:
 
         event_type, raw_score = self._score_frame(frame)
 
-        # [TEMP] fall_only_mode: fall_detected 외 이벤트는 normal_activity_summary 로 강제 변환
-        if self.fall_only_mode and event_type not in self._fall_only_allowed:
-            event_type = "normal_activity_summary"
-            raw_score = 0.0
-        if model_outputs:
-            fusion = model_outputs["fusion"]
-            fused_score = float(fusion["final_fall_probability"])
-            
-            # [SENSITIVITY OPT] 규칙 기반 낙상 감지 시, XGBoost 또는 융합 모델이 지지(누움/낙상 경향성)한다면
-            # 융합 스코어 미달로 인한 억울한 정상 차단을 방지하기 위해 스코어를 확정선(0.66)으로 격상
-            if event_type == "fall_detected":
-                xgboost_label = model_outputs.get("xgboost", {}).get("label")
-                if xgboost_label in {"LYING", "FALL", "GRADUAL_FALL"} or fused_score > 0.2:
-                    raw_score = max(raw_score, 0.66)
-
-            if self._model_outputs_contradict_motion_rule(event_type, model_outputs):
-                event_type = "normal_activity_summary"
-                raw_score = 0.0
-            elif fused_score > raw_score:
-                if self.fall_only_mode and fused_score < self.decision_threshold:
-                    pass
-                else:
-                    event_type = "fall_detected" if fused_score > 0 else event_type
-                    raw_score = fused_score
-        if event_type == "normal_activity_summary" and raw_score == 0.0:
+        # Model outputs are diagnostics only. The rule score and temporal FSM own the decision.
+        if event_type in {"normal_activity", "normal_activity_summary"} and raw_score == 0.0:
             self._resolve_competing_track_events(frame)
         key = f"{frame.camera_id}:{frame.track_id}:{event_type}"
         smoothed = self.smoother.update(key, raw_score)
@@ -157,35 +132,30 @@ class Pi5SkeletonPipeline:
             if not self.fall_only_mode:
                 hb_key = f"{frame.camera_id}:{frame.track_id}"
                 now = time.perf_counter()
-                last_hb = self._last_normal_heartbeat_ts.get(hb_key, 0.0)
-                if now - last_hb < self._normal_heartbeat_interval_sec:
+                last_hb = self._last_normal_heartbeat_ts.get(hb_key)
+                if last_hb is None or now - last_hb < self._normal_heartbeat_interval_sec:
+                    self._last_normal_heartbeat_ts.setdefault(hb_key, now)
                     return None
                 self._last_normal_heartbeat_ts[hb_key] = now
         final_risk_label = smoothed.level
         final_state = managed.state
         final_risk_score = to_risk_score(smoothed.ema_risk)
+        delivery_suppressed = False
 
-        if self.fall_only_mode and final_risk_label in {"suspicious", "abnormal"}:
+        if self.fall_only_mode and final_risk_label != "normal":
             final_risk_label = "normal"
             final_state = "NORMAL"
             final_risk_score = 1
-            if model_outputs is not None:
-                if "fusion" in model_outputs:
-                    model_outputs["fusion"]["final_label"] = "normal"
-                    model_outputs["fusion"]["final_fall_probability"] = 0.0
-                if "xgboost" in model_outputs:
-                    model_outputs["xgboost"]["label"] = "NORMAL"
-                    model_outputs["xgboost"]["probability"] = 1.0
-                if "stgcn" in model_outputs and isinstance(model_outputs["stgcn"], dict):
-                    model_outputs["stgcn"]["label"] = "NORMAL"
-                    model_outputs["stgcn"]["probability"] = 1.0
+            delivery_suppressed = True
 
         result = {
             "event_id": managed.event_id,
             "camera_id": frame.camera_id,
             "frame_id": frame.frame_id,
             "track_id": frame.track_id,
-            "event_type": event_type if final_risk_label != "normal" else "normal_activity_summary",
+            "event_type": event_type
+            if not delivery_suppressed and (raw_score > 0.0 or final_risk_label != "normal")
+            else "normal_activity_summary",
             "state": final_state,
             "risk_label": final_risk_label,
             "risk_score": final_risk_score,
@@ -195,6 +165,16 @@ class Pi5SkeletonPipeline:
             "timestamp_ms": frame.timestamp_ms,
             "capture_ts": frame.capture_ts,
             "analysis_ts": utc_iso_now(),
+            "temporal_decision": {
+                "result": managed.temporal_decision,
+                "state": managed.state,
+                "event_type": managed.event_type,
+                "started_at_ms": managed.started_at_ms,
+                "updated_at_ms": managed.updated_at_ms,
+                "stale_input": managed.stale_input,
+            },
+            "activity_diagnostics": self._activity_diagnostics(frame),
+            "delivery_suppressed": delivery_suppressed,
         }
         if model_outputs is not None:
             result["model_outputs"] = model_outputs
@@ -290,20 +270,13 @@ class Pi5SkeletonPipeline:
             or abs(float(features.get("pose_delta_mean", 0.0))) >= self.fall_motion_pose_delta_threshold
         )
         
-        # [STATIC LYING BYPASS] 정적 누움 상태(움직임 소실 후 누운 자세)도 낙상 징후로 포섭
+        # Static posture is retained as a low-risk diagnostic candidate; motion is required for fall scoring.
         is_lying_state = (
             fall_motion_confirmed
             or static_duration >= 1500.0
-            or str(features.get("coarse_action", "")).upper() in {"LYING", "FALL"}
-            or str(features.get("action_label", "")).upper() in {"LYING", "FALL"}
         )
 
-        # [LYING BYPASS] 종횡비가 미달이더라도 포즈 분류 결과가 명확히 LYING/FALL 이면 낙상 징후로 포섭
-        is_aspect_ratio_satisfied = (
-            bbox_aspect_ratio >= self.lying_bbox_aspect_ratio_threshold
-            or str(features.get("coarse_action", "")).upper() in {"LYING", "FALL"}
-            or str(features.get("action_label", "")).upper() in {"LYING", "FALL"}
-        )
+        is_aspect_ratio_satisfied = bbox_aspect_ratio >= self.lying_bbox_aspect_ratio_threshold
 
         if not self._has_reliable_rule_pose(frame):
             if (
@@ -315,7 +288,7 @@ class Pi5SkeletonPipeline:
                     0.55 + (bbox_aspect_ratio / max(self.lying_bbox_aspect_ratio_threshold * 3.0, 1.0)) * 0.30,
                     0.85,
                 )
-                return "fall_detected", score
+                return ("fall_detected", score) if fall_motion_confirmed else ("lying_down", min(score, 0.55))
             if pose_confidence < self.low_confidence_threshold and static_duration >= self.pose_lost_threshold_ms:
                 score = min(static_duration / max(self.pose_lost_threshold_ms * 3.0, 1.0), 0.8)
                 return "pose_lost_inactivity", score
@@ -330,7 +303,7 @@ class Pi5SkeletonPipeline:
                 0.55 + (bbox_aspect_ratio / max(self.lying_bbox_aspect_ratio_threshold * 3.0, 1.0)) * 0.30,
                 0.85,
             )
-            return "fall_detected", score
+            return ("fall_detected", score) if fall_motion_confirmed else ("lying_down", min(score, 0.55))
 
         speed = abs(float(features.get("center_velocity_px_s", 0.0)))
         if speed >= self.running_speed_threshold:
@@ -359,7 +332,7 @@ class Pi5SkeletonPipeline:
                 0.45 + (bbox_aspect_ratio / max(self.lying_bbox_aspect_ratio_threshold * 2.0, 1.0)) * 0.35,
                 0.85,
             )
-            return "fall_detected", score
+            return "lying_down", min(score, 0.55)
 
         if static_duration >= self.static_threshold_ms and not is_bed_context:
             return "faint_static", min(static_duration / max(self.static_threshold_ms * 2.0, 1.0), 1.0)
@@ -413,6 +386,20 @@ class Pi5SkeletonPipeline:
             and float(xgboost.get("probability", 0.0) or 0.0) >= 0.9
             and str(stgcn.get("label", "")).upper() in {"STANDING", "SITTING"}
         )
+
+    def _activity_diagnostics(self, frame: SkeletonFrame) -> dict[str, Any]:
+        features = frame.features or {}
+        labels = {
+            str(features.get("action_label", "")).upper(),
+            str(features.get("coarse_action", "")).upper(),
+        }
+        return {
+            "action_label": features.get("action_label"),
+            "coarse_action": features.get("coarse_action"),
+            "lying_seen": "LYING" in labels,
+            "fall_seen": bool(labels & {"FALL", "FALL_DOWN", "GRADUAL_FALL"}),
+            "pose_lost_fallback": bool(features.get("pose_lost_fallback") or "pose-lost" in str(frame.frame_id)),
+        }
 
 
 def _circular_abs_delta(value: float) -> float:

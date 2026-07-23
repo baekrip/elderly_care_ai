@@ -15,6 +15,8 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 @dataclass(frozen=True)
 class BackendConfig:
+    deployment_mode: str = "normal"
+    alerts_enabled: bool = True
     enabled: bool = False
     base_url: str = ""
     token: str = ""
@@ -29,6 +31,25 @@ class BackendConfig:
     contract_error_file: str = "server/storage/results/backend_contract_errors.jsonl"
     max_pending_events: int = 10000
     max_pending_age_hours: float = 24.0
+
+    def __post_init__(self) -> None:
+        normalized_mode = str(self.deployment_mode).strip().lower()
+        if normalized_mode not in {"normal", "shadow"}:
+            raise ValueError(
+                f"unsupported deployment.mode: {self.deployment_mode!r}"
+            )
+        if normalized_mode == "shadow" and self.alerts_enabled:
+            raise ValueError(
+                "invalid shadow configuration: "
+                "deployment.mode=shadow requires deployment.alerts_enabled=false"
+            )
+
+    @property
+    def suppress_immediate_alerts(self) -> bool:
+        return (
+            str(self.deployment_mode).strip().lower() == "shadow"
+            or not self.alerts_enabled
+        )
 
     @property
     def events_batch_url(self) -> str:
@@ -119,7 +140,20 @@ _load_project_dotenv = load_project_dotenv
 
 
 def config_from_project_config(project_config: dict[str, Any]) -> BackendConfig:
+    deployment = project_config.get("deployment", {}) or {}
     backend = project_config.get("backend", {}) or {}
+
+    if not isinstance(deployment, dict):
+        raise ValueError("deployment configuration must be a mapping")
+
+    deployment_mode = str(deployment.get("mode", "normal")).strip().lower() or "normal"
+    raw_alerts_enabled = deployment.get("alerts_enabled")
+    if raw_alerts_enabled is None:
+        alerts_enabled = deployment_mode != "shadow"
+    elif isinstance(raw_alerts_enabled, bool):
+        alerts_enabled = raw_alerts_enabled
+    else:
+        raise ValueError("deployment.alerts_enabled must be a boolean")
 
     env_backend_url = os.getenv("BACKEND_URL", "").strip()
     if env_backend_url == "54.116.119.98":
@@ -161,6 +195,8 @@ def config_from_project_config(project_config: dict[str, Any]) -> BackendConfig:
         )
 
     return BackendConfig(
+        deployment_mode=deployment_mode,
+        alerts_enabled=alerts_enabled,
         enabled=enabled,
         base_url=base_url,
         token=token,
@@ -459,6 +495,20 @@ class BackendForwarder:
         return self._post_json(self.config.events_batch_url, build_events_batch(events))
 
     def post_immediate_alert(self, alert: dict[str, Any]) -> BackendResponse:
+        if self.config.suppress_immediate_alerts:
+            suppressed_alert = dict(alert)
+            suppressed_alert["delivery_suppressed"] = True
+            suppressed_alert["suppression_reason"] = (
+                "shadow_mode"
+                if str(self.config.deployment_mode).strip().lower() == "shadow"
+                else "alerts_disabled"
+            )
+            return BackendResponse(
+                ok=True,
+                status_code=0,
+                text=f"suppressed:{suppressed_alert['suppression_reason']}",
+                json_body=suppressed_alert,
+            )
         return self._post_json(self.config.alerts_immediate_url, alert)
 
     def retry_pending(self) -> PendingReplayResult:

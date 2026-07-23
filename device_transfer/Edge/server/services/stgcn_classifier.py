@@ -40,11 +40,19 @@ FRAMES = 24
 JOINTS = 17
 PERSONS = 1
 INPUT_SHAPE = (1, CHANNELS, FRAMES, JOINTS, PERSONS)
+MULTITASK_INPUT_SHAPE = (1, 60, 17, 3)
+
+
+def _require_tensorrt_enqueue(succeeded: bool, operation: str) -> None:
+    if not succeeded:
+        raise RuntimeError(
+            f"TensorRT {operation} failed; inference output was discarded"
+        )
 
 
 class TensorRTSTGCNRunner:
     def __init__(self, engine_path: str) -> None:
-        import pycuda.autoinit  # noqa: F401
+        import pycuda.autoprimaryctx  # noqa: F401
         import pycuda.driver as cuda
         import tensorrt as trt
 
@@ -83,14 +91,181 @@ class TensorRTSTGCNRunner:
         if self.is_legacy:
             self.bindings[self.input_binding_index] = int(self.device_input)
             self.bindings[self.output_binding_index] = int(self.device_output)
-            self.context.execute_async_v2(self.bindings, self.stream.handle)
+            _require_tensorrt_enqueue(
+                self.context.execute_async_v2(self.bindings, self.stream.handle),
+                "execute_async_v2",
+            )
         else:
             self.context.set_tensor_address("input", int(self.device_input))
             self.context.set_tensor_address("output", int(self.device_output))
-            self.context.execute_async_v3(self.stream.handle)
+            _require_tensorrt_enqueue(
+                self.context.execute_async_v3(self.stream.handle),
+                "execute_async_v3",
+            )
         self.cuda.memcpy_dtoh_async(self.host_output, self.device_output, self.stream)
         self.stream.synchronize()
         return np.array(self.host_output, copy=True)
+
+
+class MultiTaskTensorRTRunner:
+    def __init__(self, engine_path: str) -> None:
+        import pycuda.autoprimaryctx  # noqa: F401
+        import pycuda.driver as cuda
+        import tensorrt as trt
+
+        self.cuda = cuda
+        runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+        self.engine = runtime.deserialize_cuda_engine(Path(engine_path).read_bytes())
+        if self.engine is None:
+            raise RuntimeError("TensorRT MultiTask engine deserialization failed")
+        self.context = self.engine.create_execution_context()
+        if self.context is None:
+            raise RuntimeError("TensorRT MultiTask execution context creation failed")
+
+        self.is_legacy = hasattr(self.engine, "get_binding_index")
+        if self.is_legacy:
+            names = [
+                self.engine.get_binding_name(index)
+                for index in range(int(self.engine.num_bindings))
+            ]
+            if "input" not in names:
+                raise RuntimeError(f"TensorRT MultiTask input missing: {names}")
+            self.input_binding_index = self.engine.get_binding_index("input")
+            self.output_binding_indices = {
+                name: self.engine.get_binding_index(name)
+                for name in ("activity_logits", "risk_logits")
+            }
+            input_shape = tuple(self.engine.get_binding_shape(self.input_binding_index))
+            if any(int(dim) < 0 for dim in input_shape):
+                self.context.set_binding_shape(
+                    self.input_binding_index,
+                    MULTITASK_INPUT_SHAPE,
+                )
+            output_shapes = {
+                name: tuple(self.context.get_binding_shape(index))
+                for name, index in self.output_binding_indices.items()
+            }
+            self.bindings = [0] * int(self.engine.num_bindings)
+        else:
+            names = [
+                self.engine.get_tensor_name(index)
+                for index in range(int(self.engine.num_io_tensors))
+            ]
+            if "input" not in names:
+                raise RuntimeError(f"TensorRT MultiTask input missing: {names}")
+            self.input_name = "input"
+            self.output_names = ("activity_logits", "risk_logits")
+            self.context.set_input_shape(self.input_name, MULTITASK_INPUT_SHAPE)
+            output_shapes = {
+                name: tuple(self.context.get_tensor_shape(name))
+                for name in self.output_names
+            }
+
+        if set(output_shapes) != {"activity_logits", "risk_logits"}:
+            raise RuntimeError(
+                f"TensorRT MultiTask output names mismatch: {sorted(output_shapes)}"
+            )
+        if output_shapes["activity_logits"][-1] != 5:
+            raise RuntimeError(
+                f"unexpected activity output shape: {output_shapes['activity_logits']}"
+            )
+        if output_shapes["risk_logits"][-1] != 3:
+            raise RuntimeError(
+                f"unexpected risk output shape: {output_shapes['risk_logits']}"
+            )
+
+        self.input_shape = MULTITASK_INPUT_SHAPE
+        self.output_shapes = output_shapes
+        self.stream = cuda.Stream()
+        self.host_input = np.empty(self.input_shape, dtype=np.float32)
+        self.device_input = cuda.mem_alloc(self.host_input.nbytes)
+        self.host_outputs = {
+            name: np.empty(shape, dtype=np.float32)
+            for name, shape in output_shapes.items()
+        }
+        self.device_outputs = {
+            name: cuda.mem_alloc(values.nbytes)
+            for name, values in self.host_outputs.items()
+        }
+
+    def infer(self, input_array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        values = np.asarray(input_array, dtype=np.float32)
+        if values.shape != self.input_shape:
+            raise ValueError(
+                f"unexpected MultiTask TensorRT input: {values.shape}"
+            )
+        np.copyto(self.host_input, np.ascontiguousarray(values))
+        self.cuda.memcpy_htod_async(self.device_input, self.host_input, self.stream)
+        if self.is_legacy:
+            self.bindings[self.input_binding_index] = int(self.device_input)
+            for name, index in self.output_binding_indices.items():
+                self.bindings[index] = int(self.device_outputs[name])
+            _require_tensorrt_enqueue(
+                self.context.execute_async_v2(self.bindings, self.stream.handle),
+                "execute_async_v2",
+            )
+        else:
+            self.context.set_tensor_address("input", int(self.device_input))
+            for name in self.output_names:
+                self.context.set_tensor_address(name, int(self.device_outputs[name]))
+            _require_tensorrt_enqueue(
+                self.context.execute_async_v3(self.stream.handle),
+                "execute_async_v3",
+            )
+        for name, host_output in self.host_outputs.items():
+            self.cuda.memcpy_dtoh_async(
+                host_output,
+                self.device_outputs[name],
+                self.stream,
+            )
+        self.stream.synchronize()
+        outputs = tuple(
+            np.array(self.host_outputs[name], copy=True)
+            for name in ("activity_logits", "risk_logits")
+        )
+        return outputs[0], outputs[1]
+
+
+class MultiTaskOnnxRunner:
+    def __init__(self, model_path: str) -> None:
+        import onnxruntime as ort
+
+        self.session = ort.InferenceSession(
+            model_path,
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        inputs = self.session.get_inputs()
+        outputs = self.session.get_outputs()
+        if len(inputs) != 1 or len(outputs) != 2:
+            raise RuntimeError("MultiTask ST-GCN ONNX contract requires one input and two outputs")
+        input_shape = list(inputs[0].shape)
+        if input_shape[1:] != [60, 17, 3]:
+            raise RuntimeError(f"unexpected MultiTask ST-GCN input shape: {input_shape}")
+        output_shapes = [list(output.shape) for output in outputs]
+        if (
+            len(output_shapes) != 2
+            or len(output_shapes[0]) != 2
+            or len(output_shapes[1]) != 2
+            or output_shapes[0][1] != 5
+            or output_shapes[1][1] != 3
+        ):
+            raise RuntimeError(f"unexpected MultiTask ST-GCN output shapes: {output_shapes}")
+        self.input_name = inputs[0].name
+        self.output_names = [output.name for output in outputs]
+        self.input_shape = input_shape
+        self.output_shapes = output_shapes
+
+    def infer(self, input_array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        values = np.asarray(input_array, dtype=np.float32)
+        if values.ndim != 4 or tuple(values.shape[1:]) != (60, 17, 3):
+            raise ValueError(f"unexpected MultiTask ST-GCN input: {values.shape}")
+        outputs = self.session.run(self.output_names, {self.input_name: values})
+        if len(outputs) != 2:
+            raise RuntimeError("MultiTask ST-GCN ONNX returned an unexpected output count")
+        return (
+            np.asarray(outputs[0], dtype=np.float32),
+            np.asarray(outputs[1], dtype=np.float32),
+        )
 
 
 class STGCNClassifier:
@@ -118,6 +293,8 @@ class STGCNClassifier:
         self.fallback_reason = ""
         self.latency_ms = 0.0
         self.backend_detail = f"{self.backend}: initialized"
+        self.model_type = "legacy"
+        self.risk_label_map: list[str] = ["NORMAL", "ABNORMAL", "DANGER"]
         if precision == "auto":
             self.precision = "fp16" if self.device.startswith("cuda") else "fp32"
         elif precision == "fp16" and not self.device.startswith("cuda") and self.requested_backend != "tensorrt":
@@ -178,12 +355,20 @@ class STGCNClassifier:
                 self.backend = "pytorch"
                 load_path = None
             else:
-                self.fallback_reason = (
-                    f"{self.requested_backend} runtime loader unavailable; "
-                    "placeholder fallback is not TensorRT proof"
-                )
-                self.backend_detail = f"fallback: {self.fallback_reason}"
-                self.backend = "pytorch"
+                started = time.perf_counter()
+                try:
+                    self._load_multitask_onnx(str(model_path))
+                    self.latency_ms = round((time.perf_counter() - started) * 1000.0, 4)
+                    self.backend = "onnxruntime"
+                    self.backend_detail = "onnxruntime: MultiTask ST-GCN loaded"
+                    load_path = None
+                except Exception as exc:
+                    self.latency_ms = round((time.perf_counter() - started) * 1000.0, 4)
+                    self.model = None
+                    self.fallback_reason = f"ONNX MultiTask load failed: {exc}"
+                    self.backend_detail = f"fallback: {self.fallback_reason}"
+                    self.backend = "pytorch"
+                    load_path = None
 
         if load_path:
             if self.backend == "pytorch" and (load_path.endswith(".onnx") or load_path.endswith(".engine")):
@@ -228,7 +413,33 @@ class STGCNClassifier:
         logger.info("ST-GCN model loaded from %s", model_path)
 
     def _load_tensorrt_engine(self, engine_path: str) -> None:
-        self.model = TensorRTSTGCNRunner(engine_path)
+        try:
+            self.model = MultiTaskTensorRTRunner(engine_path)
+        except RuntimeError:
+            self.model = TensorRTSTGCNRunner(engine_path)
+            self.model_type = "legacy"
+            return
+        self.model_type = "multitask_tensorrt"
+        self.label_map = [
+            "STANDING",
+            "SITTING",
+            "WALKING",
+            "LYING",
+            "FALL_DOWN",
+        ]
+        self.risk_label_map = ["NORMAL", "ABNORMAL", "DANGER"]
+
+    def _load_multitask_onnx(self, model_path: str) -> None:
+        self.model = MultiTaskOnnxRunner(model_path)
+        self.model_type = "multitask_onnx"
+        self.label_map = [
+            "STANDING",
+            "SITTING",
+            "WALKING",
+            "LYING",
+            "FALL_DOWN",
+        ]
+        self.risk_label_map = ["NORMAL", "ABNORMAL", "DANGER"]
 
     def _apply_model_precision(self) -> None:
         if self.model is not None and self.precision == "fp16":
@@ -243,6 +454,9 @@ class STGCNClassifier:
             "load_attempted": self.load_attempted,
             "fallback_reason": self.fallback_reason,
             "latency_ms": self.latency_ms,
+            "model_type": self.model_type,
+            "label_map": list(self.label_map),
+            "risk_label_map": list(self.risk_label_map),
         }
 
     def _input_tensor_for_inference(self, input_array: np.ndarray) -> Any:
@@ -260,6 +474,9 @@ class STGCNClassifier:
         Returns:
             numpy array of shape (1, 3, 24, 17, 1)
         """
+        if self.model_type in {"multitask_onnx", "multitask_tensorrt"}:
+            return self._prepare_multitask_input(window)
+
         tensor = np.zeros((1, CHANNELS, FRAMES, JOINTS, PERSONS), dtype=np.float32)
 
         frames = window.sequence
@@ -290,6 +507,30 @@ class STGCNClassifier:
 
         return tensor
 
+    @staticmethod
+    def _prepare_multitask_input(window: Any) -> np.ndarray:
+        tensor = np.zeros((1, 60, JOINTS, CHANNELS), dtype=np.float32)
+        frames = list(window.sequence)
+        if not frames:
+            return tensor
+        indices = np.rint(np.linspace(0, len(frames) - 1, 60)).astype(np.int64)
+        for target_index, source_index in enumerate(indices):
+            keypoints = frames[int(source_index)].keypoints_17
+            for joint_index, point in enumerate(keypoints[:JOINTS]):
+                if len(point) >= CHANNELS:
+                    tensor[0, target_index, joint_index] = np.asarray(
+                        point[:CHANNELS],
+                        dtype=np.float32,
+                    )
+        return tensor
+
+    @staticmethod
+    def _softmax(logits: np.ndarray) -> np.ndarray:
+        values = np.asarray(logits, dtype=np.float32)
+        shifted = values - np.max(values, axis=1, keepdims=True)
+        exponent = np.exp(shifted)
+        return exponent / np.maximum(exponent.sum(axis=1, keepdims=True), 1e-12)
+
     def classify(self, window: Any) -> tuple[str, float, str]:
         """Classify a CandidateWindow.
 
@@ -305,6 +546,30 @@ class STGCNClassifier:
             )
 
         input_tensor = self.prepare_input(window)
+        if self.backend == "tensorrt" and self.model_type == "multitask_tensorrt":
+            started = time.perf_counter()
+            runner = self.model
+            if runner is None or not hasattr(runner, "infer"):
+                raise RuntimeError("MultiTask ST-GCN TensorRT runner is not initialized")
+            activity_logits, risk_logits = runner.infer(input_tensor)
+            activity_probabilities = self._softmax(activity_logits)
+            risk_probabilities = self._softmax(risk_logits)
+            activity_index = int(activity_probabilities[0].argmax())
+            risk_index = int(risk_probabilities[0].argmax())
+            activity_label = self.label_map[activity_index]
+            risk_label = self.risk_label_map[risk_index]
+            activity_confidence = float(activity_probabilities[0, activity_index])
+            risk_confidence = float(risk_probabilities[0, risk_index])
+            final_label = "FALL" if risk_label == "DANGER" else activity_label
+            confidence = risk_confidence if risk_label == "DANGER" else activity_confidence
+            self.latency_ms = round((time.perf_counter() - started) * 1000.0, 4)
+            detail = (
+                "inference_mode: multitask tensorrt; "
+                f"activity={activity_label}:{activity_confidence:.6f}; "
+                f"risk={risk_label}:{risk_confidence:.6f}"
+            )
+            return final_label, confidence, detail
+
         if self.backend == "tensorrt" and isinstance(self.model, TensorRTSTGCNRunner):
             started = time.perf_counter()
             output_array = self.model.infer(input_tensor)
@@ -316,6 +581,30 @@ class STGCNClassifier:
             confidence = float(probabilities[pred_idx])
             self.latency_ms = round((time.perf_counter() - started) * 1000.0, 4)
             return self.label_map[pred_idx], confidence, "inference_mode: tensorrt engine loaded"
+
+        if self.backend == "onnxruntime" and self.model_type == "multitask_onnx":
+            started = time.perf_counter()
+            runner = self.model
+            if runner is None or not hasattr(runner, "infer"):
+                raise RuntimeError("MultiTask ST-GCN ONNX runner is not initialized")
+            activity_logits, risk_logits = runner.infer(input_tensor)
+            activity_probabilities = self._softmax(activity_logits)
+            risk_probabilities = self._softmax(risk_logits)
+            activity_index = int(activity_probabilities[0].argmax())
+            risk_index = int(risk_probabilities[0].argmax())
+            activity_label = self.label_map[activity_index]
+            risk_label = self.risk_label_map[risk_index]
+            activity_confidence = float(activity_probabilities[0, activity_index])
+            risk_confidence = float(risk_probabilities[0, risk_index])
+            final_label = "FALL" if risk_label == "DANGER" else activity_label
+            confidence = risk_confidence if risk_label == "DANGER" else activity_confidence
+            self.latency_ms = round((time.perf_counter() - started) * 1000.0, 4)
+            detail = (
+                "inference_mode: multitask onnx; "
+                f"activity={activity_label}:{activity_confidence:.6f}; "
+                f"risk={risk_label}:{risk_confidence:.6f}"
+            )
+            return final_label, confidence, detail
 
         if torch is None:
             return (

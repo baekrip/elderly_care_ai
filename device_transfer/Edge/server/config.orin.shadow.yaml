@@ -1,14 +1,16 @@
 # ===================================================
 # Jetson Orin Nano local Edge Hub config
-# 실행: python -m server.main --config server/config.orin.yaml --host 0.0.0.0 --port 8000
+# 실행: python -m server.main --config server/config.orin.shadow.yaml --host 0.0.0.0 --port 8000
 # ===================================================
 
 app:
-  name: "elderly-care-orin-edge-hub"
+  name: "elderly-care-orin-edge-hub-shadow"
 
 deployment:
-  mode: "normal"
-  alerts_enabled: true
+  mode: "shadow"
+  alerts_enabled: false
+  runtime_activation: "disabled"
+  external_validation_required: true
 
 patient:
   patient_id: "P001"
@@ -22,7 +24,7 @@ storage:
   clip_json_dir: "server/storage/results/clip_json"
 
 events:
-  fall_only_mode: true  # [TEMP] 낙상+정상 외 이벤트 억제. 복구: false
+  fall_only_mode: false
   normal_heartbeat_interval_sec: 2.0
   default_pre_clip_ms: 90000
   default_post_clip_ms: 90000
@@ -32,6 +34,7 @@ events:
   danger_labels:
     - "DROP"
     - "FALL"
+    - "FALL_DOWN"
     - "GRADUAL_FALL"
     - "GRADUAL_COLLAPSE"
     - "LOSS_OF_BALANCE"
@@ -41,9 +44,9 @@ streams:
   enabled: true
 
 stgcn:
-  model_path: "server/models/stgcn_fall_binary.onnx"
+  model_path: "server/models/stgcn_activity_fixed_split_v1_fp16.engine"
   device: "cuda"
-  backend: "onnxruntime"
+  backend: "tensorrt"
   precision: "fp16"
   window_ms: 5000
   min_window_frames: 8

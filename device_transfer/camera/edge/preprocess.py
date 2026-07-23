@@ -39,6 +39,19 @@ class FramePreprocessor:
                 },
             )
 
+        if not self.clahe_enabled and abs(self.gamma - 1.0) <= 1e-3:
+            return PreprocessResult(
+                frame=frame,
+                metadata={
+                    "enabled": True,
+                    "clahe_applied": False,
+                    "gamma_applied": False,
+                    "brightness_score": brightness_score,
+                    "processed_brightness_score": brightness_score,
+                    "low_light": brightness_score < self.brightness_warning_threshold,
+                },
+            )
+
         processed = frame.copy()
         gamma_applied = False
         if abs(self.gamma - 1.0) > 1e-3:

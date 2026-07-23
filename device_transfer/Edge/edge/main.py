@@ -5,6 +5,7 @@ import ipaddress
 import logging
 import time
 from collections import defaultdict, deque
+from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Any
 
@@ -28,6 +29,8 @@ from edge.tracker import SimpleTracker
 from edge.trigger_engine import TriggerEngine
 from edge.video_buffer import RollingVideoBuffer
 from edge.ws_sender import SkeletonWebSocketSender
+from tools.roi_bootstrap import BootRoiBootstrap
+from tools.manual_roi_store import ManualRoiError, load_manual_room_rois
 from shared.protocol import (
     ActivityFrame,
     ActivityFrameBatch,
@@ -403,6 +406,47 @@ def apply_cli_overrides(config: dict, args: argparse.Namespace) -> dict:
     return config
 
 
+def bootstrap_rois_from_first_frame(config: dict[str, Any], camera: Any, roi_bootstrap: BootRoiBootstrap) -> Any | None:
+    if not roi_bootstrap.enabled:
+        return None
+    first_packet = camera.read()
+    if first_packet is None:
+        raise RuntimeError("SAM3 ROI bootstrap could not read the first camera frame")
+    config["room_rois"] = roi_bootstrap.ensure(first_packet.frame)
+    LOGGER.info("SAM3 boot ROI map ready: %s", roi_bootstrap.output_path)
+    return first_packet
+
+
+def load_manual_rois_from_config(config: dict[str, Any]) -> bool:
+    manual_config = config.get("manual_roi", {}) or {}
+    if not bool(manual_config.get("enabled", False)):
+        return False
+    state_path = Path(str(manual_config.get("state_path", "edge/storage/roi/manual_roi_state.json")))
+    try:
+        room_rois = load_manual_room_rois(state_path)
+    except ManualRoiError as exc:
+        LOGGER.warning("manual ROI state is invalid: %s", exc)
+        return False
+    if room_rois is None:
+        LOGGER.warning("manual ROI review is pending: %s", state_path)
+        return False
+    config["room_rois"] = room_rois
+    LOGGER.info("manual ROI map ready: %s", state_path)
+    return True
+
+
+def enforce_roi_context(config: dict[str, Any], *, manual_rois_ready: bool, roi_bootstrap_enabled: bool) -> None:
+    manual_config = config.get("manual_roi", {}) or {}
+    if (
+        bool(manual_config.get("enabled", False))
+        and bool(manual_config.get("fail_closed", True))
+        and not manual_rois_ready
+        and not roi_bootstrap_enabled
+    ):
+        state_path = str(manual_config.get("state_path", "edge/storage/roi/manual_roi_state.json"))
+        raise RuntimeError(f"manual ROI review is required before runtime start: {state_path}")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     args = build_parser().parse_args()
@@ -418,7 +462,7 @@ def main() -> None:
         max_age_ms=int(config["classification"].get("track_max_age_ms", 1500)),
         iou_threshold=float(config["classification"].get("track_iou_threshold", 0.25)),
     )
-    feature_extractor = FeatureExtractor(config.get("room_rois", {}))
+    roi_bootstrap = BootRoiBootstrap(config)
     classifier = None if skeleton_sender_role else ActionClassifier(config)
     tier_classifier = None if skeleton_sender_role else TierClassifier(config)
     trigger_engine = None if skeleton_sender_role else TriggerEngine(config)
@@ -454,6 +498,10 @@ def main() -> None:
     last_candidate_sent_ms: dict[tuple[int, str], int] = {}
 
     camera.open()
+    manual_rois_ready = load_manual_rois_from_config(config)
+    enforce_roi_context(config, manual_rois_ready=manual_rois_ready, roi_bootstrap_enabled=roi_bootstrap.enabled)
+    first_packet = None if manual_rois_ready else bootstrap_rois_from_first_frame(config, camera, roi_bootstrap)
+    feature_extractor = FeatureExtractor(config.get("room_rois", {}))
     streamer.start()
     event_listener.start()
     if clip_rest_server is not None:
@@ -522,7 +570,11 @@ def main() -> None:
                 LOGGER.info("max_frames reached: %s", args.max_frames)
                 break
 
-            packet = camera.read()
+            if first_packet is not None:
+                packet = first_packet
+                first_packet = None
+            else:
+                packet = camera.read()
             if packet is None:
                 if camera.exhausted:
                     LOGGER.info("input source exhausted")

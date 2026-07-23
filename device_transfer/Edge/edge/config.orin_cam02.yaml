@@ -48,6 +48,26 @@ trigger_thresholds:
 
 room_rois: {}                   # 예: bed: [0.0, 0.0, 0.5, 1.0] normalized x1,y1,x2,y2
 
+roi_bootstrap:
+  enabled: false
+  fail_closed: true
+  model_path: "edge/models/sam3.pt"
+  output_path: "edge/storage/masks/mask_map.json"
+  reuse_until_reboot: true
+  required_rois: ["bed", "floor", "chair"]
+  prompts:
+    bed: "bed"
+    floor: "floor"
+    chair: "chair"
+  confidence: 0.25
+
+manual_roi:
+  enabled: true
+  fail_closed: true
+  state_path: "edge/storage/roi/manual_roi_state.json"
+  required_rois: ["bed", "floor", "chair"]
+  persistent_across_reboot: true
+
 time_context:
   use_wall_clock_for_night_activity: false
 

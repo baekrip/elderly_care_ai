@@ -4,7 +4,6 @@ import queue
 import shutil
 import subprocess
 import threading
-import time
 from typing import Any
 
 import numpy as np
@@ -37,6 +36,14 @@ class RTSPStreamer:
         self.overlay_show_labels = bool(config["stream"].get("overlay_show_labels", False))
         self.overlay_keypoint_threshold = float(config["stream"].get("overlay_keypoint_threshold", 0.2))
         self.overlay_motion_compensation = bool(config["stream"].get("overlay_motion_compensation", True))
+        self.overlay_stability_confidence_threshold = max(
+            self.overlay_keypoint_threshold,
+            float(config["stream"].get("overlay_stability_confidence_threshold", 0.25)),
+        )
+        self.overlay_max_motion_px = max(
+            0.0,
+            float(config["stream"].get("overlay_max_motion_px", 24.0)),
+        )
         self.input_pix_fmt = self._resolve_input_pix_fmt(config["stream"].get("input_pix_fmt", "bgr24"))
         self.output_pix_fmt = self._resolve_output_pix_fmt(config["stream"].get("output_pix_fmt", ""))
         self.rtsp_transport = str(config["stream"].get("rtsp_transport", "tcp")).strip().lower()
@@ -44,7 +51,10 @@ class RTSPStreamer:
         self._overlay_prev_source_ids: tuple[int, ...] = ()
         self._overlay_prev_overlays: list[dict[str, Any]] = []
         
-        self._queue: queue.Queue = queue.Queue(maxsize=30)
+        self._queue: queue.Queue = queue.Queue(
+            maxsize=max(1, int(config["stream"].get("frame_queue_size", 1)))
+        )
+        self.dropped_frame_count = 0
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._process: subprocess.Popen | None = None
@@ -63,23 +73,38 @@ class RTSPStreamer:
             return
         self._process = subprocess.Popen(self.command, shell=True)
 
-    def write_frame(self, frame: np.ndarray, overlays: list[dict[str, Any]] | None = None) -> None:
+    def write_frame(
+        self,
+        frame: np.ndarray,
+        overlays: list[dict[str, Any]] | None = None,
+        *,
+        fresh_pose_result: bool = False,
+    ) -> None:
         if not self.enabled or self.mode != "frame_pipe" or not self._started:
             return
         if frame.ndim != 3 or frame.shape[2] != 3:
             return
         if self.overlay_enabled:
-            frame = self._draw_overlays(frame, overlays or [])
+            frame = self._draw_overlays(frame, overlays or [], fresh_pose_result=fresh_pose_result)
             
         try:
-            if self._queue.full():
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    pass
-            self._queue.put_nowait(frame.copy())
+            self._enqueue_latest(frame)
         except Exception as exc:
             LOGGER.warning("failed to queue frame for streaming: %s", exc)
+
+    def _enqueue_latest(self, frame: np.ndarray) -> None:
+        queued_frame = frame.copy()
+        while True:
+            try:
+                self._queue.put_nowait(queued_frame)
+                return
+            except queue.Full:
+                try:
+                    self._queue.get_nowait()
+                    self._queue.task_done()
+                    self.dropped_frame_count += 1
+                except queue.Empty:
+                    continue
 
     def _stream_worker(self) -> None:
         while not self._stop_event.is_set():
@@ -105,13 +130,20 @@ class RTSPStreamer:
             finally:
                 self._queue.task_done()
 
-    def _draw_overlays(self, frame: np.ndarray, overlays: list[dict[str, Any]]) -> np.ndarray:
+    def _draw_overlays(
+        self,
+        frame: np.ndarray,
+        overlays: list[dict[str, Any]],
+        *,
+        fresh_pose_result: bool = False,
+    ) -> np.ndarray:
         output = np.ascontiguousarray(frame.copy())
-        drawable_overlays = self._motion_compensated_overlays(frame, overlays)
+        drawable_overlays = self._motion_compensated_overlays(
+            frame,
+            overlays,
+            fresh_pose_result=fresh_pose_result,
+        )
         occupied_labels: list[tuple[int, int, int, int]] = []
-        status_rect = self._draw_status_overlay(output)
-        if status_rect is not None:
-            occupied_labels.append(status_rect)
         for overlay in drawable_overlays:
             bbox = overlay.get("bbox")
             keypoints = overlay.get("keypoints") or []
@@ -139,6 +171,8 @@ class RTSPStreamer:
         self,
         frame: np.ndarray,
         overlays: list[dict[str, Any]],
+        *,
+        fresh_pose_result: bool = False,
     ) -> list[dict[str, Any]]:
         normalized = [self._normalize_overlay(overlay) for overlay in overlays]
         normalized = [overlay for overlay in normalized if overlay.get("bbox")]
@@ -150,6 +184,9 @@ class RTSPStreamer:
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         source_ids = tuple(int(overlay.get("_source_id", 0)) for overlay in normalized)
+        if fresh_pose_result:
+            self._remember_motion_state(gray, source_ids, normalized)
+            return normalized
         if (
             not self.overlay_motion_compensation
             or self._overlay_prev_gray is None
@@ -180,7 +217,12 @@ class RTSPStreamer:
             except (TypeError, ValueError):
                 normalized_keypoints.append([0.0, 0.0, 0.0])
         normalized = dict(overlay)
-        normalized["_source_id"] = id(detection) if detection is not None else id(overlay)
+        track_id = overlay.get("track_id")
+        fallback_source_id = id(detection) if detection is not None else id(overlay)
+        try:
+            normalized["_source_id"] = int(track_id) if track_id is not None else fallback_source_id
+        except (TypeError, ValueError):
+            normalized["_source_id"] = fallback_source_id
         normalized["bbox"] = [float(value) for value in bbox[:4]] if bbox and len(bbox) >= 4 else []
         normalized["keypoints"] = normalized_keypoints
         return normalized
@@ -195,12 +237,19 @@ class RTSPStreamer:
         tracked_indexes: list[int] = []
         prev_points: list[list[float]] = []
         for index, keypoint in enumerate(prev_keypoints):
-            if len(keypoint) < 3 or float(keypoint[2]) < self.overlay_keypoint_threshold:
+            if len(keypoint) < 3 or float(keypoint[2]) < self.overlay_stability_confidence_threshold:
+                continue
+            current_keypoints = current.get("keypoints") or []
+            if (
+                index >= len(current_keypoints)
+                or len(current_keypoints[index]) < 3
+                or float(current_keypoints[index][2]) < self.overlay_stability_confidence_threshold
+            ):
                 continue
             prev_points.append([float(keypoint[0]), float(keypoint[1])])
             tracked_indexes.append(index)
         if not prev_points or self._overlay_prev_gray is None:
-            return current
+            return self._hold_previous_geometry(current, previous)
 
         next_points, status, _ = cv2.calcOpticalFlowPyrLK(
             self._overlay_prev_gray,
@@ -212,10 +261,9 @@ class RTSPStreamer:
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
         )
         if next_points is None or status is None:
-            return current
+            return self._hold_previous_geometry(current, previous)
 
         good_deltas: list[tuple[float, float]] = []
-        compensated_keypoints = [list(keypoint) for keypoint in prev_keypoints]
         for point_index, keypoint_index in enumerate(tracked_indexes):
             if int(status[point_index][0]) != 1:
                 continue
@@ -223,18 +271,37 @@ class RTSPStreamer:
             next_y = float(next_points[point_index][0][1])
             prev_x, prev_y = prev_points[point_index]
             good_deltas.append((next_x - prev_x, next_y - prev_y))
-            compensated_keypoints[keypoint_index][0] = next_x
-            compensated_keypoints[keypoint_index][1] = next_y
         if not good_deltas:
-            return current
+            return self._hold_previous_geometry(current, previous)
 
         dx = float(np.median([delta[0] for delta in good_deltas]))
         dy = float(np.median([delta[1] for delta in good_deltas]))
+        motion = float(np.hypot(dx, dy))
+        if self.overlay_max_motion_px > 0.0 and motion > self.overlay_max_motion_px:
+            scale = self.overlay_max_motion_px / motion
+            dx *= scale
+            dy *= scale
+        compensated_keypoints = [list(keypoint) for keypoint in prev_keypoints]
+        for keypoint_index in tracked_indexes:
+            compensated_keypoints[keypoint_index][0] += dx
+            compensated_keypoints[keypoint_index][1] += dy
         bbox = previous.get("bbox") or current.get("bbox") or []
         compensated = dict(current)
         compensated["bbox"] = [float(bbox[0]) + dx, float(bbox[1]) + dy, float(bbox[2]) + dx, float(bbox[3]) + dy]
         compensated["keypoints"] = compensated_keypoints
         return compensated
+
+    def _hold_previous_geometry(
+        self,
+        current: dict[str, Any],
+        previous: dict[str, Any],
+    ) -> dict[str, Any]:
+        held = dict(current)
+        if previous.get("bbox"):
+            held["bbox"] = list(previous["bbox"])
+        if previous.get("keypoints"):
+            held["keypoints"] = [list(keypoint) for keypoint in previous["keypoints"]]
+        return held
 
     def _remember_motion_state(
         self,
@@ -252,10 +319,6 @@ class RTSPStreamer:
             }
             for overlay in overlays
         ]
-
-    def _draw_status_overlay(self, frame: np.ndarray) -> tuple[int, int, int, int] | None:
-        timestamp = time.strftime("%H:%M:%S")
-        return self._draw_label(frame, f"OVERLAY ON  {self.fps}FPS  {timestamp}", 8, 24)
 
     def _draw_keypoints(self, frame: np.ndarray, keypoints: Any) -> None:
         edges = (

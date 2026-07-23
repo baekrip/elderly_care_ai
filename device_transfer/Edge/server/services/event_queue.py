@@ -15,6 +15,11 @@ class ManagedEvent:
     updated_at_ms: int
     risk_score: float
     transitions: list[dict[str, object]] = field(default_factory=list)
+    stale_input: bool = False
+
+    @property
+    def temporal_decision(self) -> str:
+        return "fall" if self.state == "CONFIRMED" else "normal"
 
 
 class EventQueue:
@@ -36,6 +41,7 @@ class EventQueue:
     ) -> ManagedEvent:
         key = (camera_id, person_id, event_type)
         event = self._events.get(key)
+        current_timestamp_ms = int(timestamp_ms)
         if event is None or event.state == "RESOLVED":
             event = ManagedEvent(
                 event_id=f"evt_{camera_id}_{person_id}_{uuid4().hex[:8]}",
@@ -43,26 +49,30 @@ class EventQueue:
                 person_id=person_id,
                 event_type=event_type,
                 state="NORMAL",
-                started_at_ms=int(timestamp_ms),
-                updated_at_ms=int(timestamp_ms),
+                started_at_ms=current_timestamp_ms,
+                updated_at_ms=current_timestamp_ms,
                 risk_score=float(risk_score),
             )
             self._events[key] = event
+        elif current_timestamp_ms < event.updated_at_ms:
+            event.stale_input = True
+            return event
 
-        next_state = self._next_state(event, risk_level, timestamp_ms)
+        event.stale_input = False
+        next_state = self._next_state(event, risk_level, current_timestamp_ms)
         if next_state != event.state:
             event.transitions.append(
                 {
                     "from": event.state,
                     "to": next_state,
-                    "timestamp_ms": int(timestamp_ms),
+                    "timestamp_ms": current_timestamp_ms,
                     "risk_level": risk_level,
                     "risk_score": float(risk_score),
                 }
             )
             event.state = next_state
         if not is_pose_lost:
-            event.updated_at_ms = int(timestamp_ms)
+            event.updated_at_ms = current_timestamp_ms
         event.risk_score = float(risk_score)
         return event
 

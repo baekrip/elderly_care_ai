@@ -1,0 +1,110 @@
+{
+  "schema_name": "COCO-17",
+  "schema_version": "1.0.0",
+  "keypoint_shape": [
+    17,
+    3
+  ],
+  "coordinate_tuple": [
+    "x",
+    "y",
+    "visibility"
+  ],
+  "keypoint_order": [
+    "nose",
+    "left_eye",
+    "right_eye",
+    "left_ear",
+    "right_ear",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+    "left_hip",
+    "right_hip",
+    "left_knee",
+    "right_knee",
+    "left_ankle",
+    "right_ankle"
+  ],
+  "visibility": {
+    "allowed_values": [
+      0,
+      1,
+      2
+    ],
+    "meaning": {
+      "0": "not labeled; coordinates should be treated as absent",
+      "1": "labeled but not visible",
+      "2": "labeled and visible"
+    }
+  },
+  "left_right_pairs": [
+    [
+      "left_eye",
+      "right_eye"
+    ],
+    [
+      "left_ear",
+      "right_ear"
+    ],
+    [
+      "left_shoulder",
+      "right_shoulder"
+    ],
+    [
+      "left_elbow",
+      "right_elbow"
+    ],
+    [
+      "left_wrist",
+      "right_wrist"
+    ],
+    [
+      "left_hip",
+      "right_hip"
+    ],
+    [
+      "left_knee",
+      "right_knee"
+    ],
+    [
+      "left_ankle",
+      "right_ankle"
+    ]
+  ],
+  "flip_index": [
+    0,
+    2,
+    1,
+    4,
+    3,
+    6,
+    5,
+    8,
+    7,
+    10,
+    9,
+    12,
+    11,
+    14,
+    13,
+    16,
+    15
+  ],
+  "canonical_hash": {
+    "algorithm": "SHA-256",
+    "output": "lowercase hexadecimal",
+    "instructions": [
+      "Parse this document as JSON.",
+      "Remove the top-level canonical_hash object before hashing to avoid self-reference.",
+      "Serialize with object keys sorted lexicographically, UTF-8 characters preserved, no insignificant whitespace, comma and colon separators, and non-finite numbers rejected.",
+      "Encode the serialized text as UTF-8.",
+      "Compute SHA-256 and store or compare the lowercase hexadecimal digest outside this schema document."
+    ]
+  },
+  "model_metadata": null,
+  "model_metadata_policy": "Checkpoint, export, and model identity metadata are intentionally not defined by this schema and must come from separately verified artifacts."
+}

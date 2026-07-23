@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+.env.example
 MEMORY.md
 
 # 가상환경
@@ -18,10 +19,15 @@ __pycache__/
 *.engine
 *.trt
 
-# 로컬 결과 파일
+# 로컬 결과 및 기기 가동 스토리지 결과 파일
 edge/storage/results/
 edge/storage/buffer/
 edge/storage/pending_candidates/
+server/storage/results/
+**/storage/results/
+*.db
+*.db-wal
+*.db-shm
 
 # 배포 번들
 deploy/
@@ -35,6 +41,12 @@ deploy/
 .omo/
 .omx/
 .tmp/
+.codex/
+~/
+
+# 에이전트 마크다운 가이드 및 백업 파일
+AGENTS.md
+.AGENTS.md.bkup
 
 # 에디터/IDE 설정
 .vscode/
@@ -53,24 +65,23 @@ kanban.zip
 *.log
 *.jsonl
 
-# 노드 모듈
+# 노드 모듈 및 스킬 폴더
 node_modules/
 package-lock.json
 package.json
 skills-lock.json
+skills/
 
 # AI 검토 출력
 docs/plan_review_output.md
 
-# Codex 관련 (일부만 보존)
-.codex/*
-!.codex/agents/
-!.codex/agents/**
-!.codex/skills/
-!.codex/skills/**
-.codex/skills/.system/**
-!.codex/prompts/
-!.codex/prompts/**
+# 테스트 코드 및 개발/분석 도구 (기기 가동 파일이 아니므로 제외)
+tests/
+tools/
+
+# 루트의 테스트/배치용 쉘 스크립트 (실제 기기용 scripts/ 내부는 제외하지 않음)
+/*.bat
+/*.ps1
 
 # 디버그 임시 파일
 scratch_debug_frame.*
