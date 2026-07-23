@@ -25,7 +25,7 @@ model:
   model_path: "edge/models/yolo26n-pose-480.onnx"
   backend: "onnxruntime"
   imgsz: 480
-  inference_stride: 3
+  inference_stride: 1
   conf_threshold: 0.15
   min_pose_confidence: 0.10   # 낙상/누움 탐지 드롭 방지: 0.15→0.10 (감도 확보)
   nms_iou_threshold: 0.65
@@ -92,7 +92,7 @@ buffer:
   danger_clip_max_duration_ms: 600000
   codec: "mp4v"
   index_file: "segments_index.jsonl"
-  write_enabled: true
+  write_enabled: false        # clip 인코딩 CPU 부하 해제 (OPT-POSE-2/3): true로 변경 시 clip 저장 재활성화
 
 stream:
   enabled: true

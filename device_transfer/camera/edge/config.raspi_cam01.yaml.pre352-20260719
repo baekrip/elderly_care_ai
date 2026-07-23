@@ -1,5 +1,5 @@
 # ===================================================
-# Pi5 + wide camera config (P5-B smoke test)
+# Pi5 + wide camera config (Nano Model)
 # 실행: python -m edge.main --config edge/config.raspi_cam01.yaml
 # ===================================================
 
@@ -22,12 +22,12 @@ camera:
 
 model:
   model_name: "yolo26n-pose"
-  model_path: "edge/models/yolo26n-pose-320.onnx"
+  model_path: "edge/models/yolo26n-pose-480.onnx"
   backend: "onnxruntime"
-  imgsz: 320
-  inference_stride: 1
-  conf_threshold: 0.10
-  min_pose_confidence: 0.05
+  imgsz: 480
+  inference_stride: 3
+  conf_threshold: 0.15
+  min_pose_confidence: 0.10   # 낙상/누움 탐지 드롭 방지: 0.15→0.10 (감도 확보)
   nms_iou_threshold: 0.65
   min_bbox_area_ratio: 0.002  # 누운 인체 소면적 허용: 0.01→0.002 (OPT-POSE-1)
   max_people: 1               # 1인 고정: CPU 리소스 집중
@@ -45,34 +45,12 @@ classification:
   confidence_threshold: 0.45
   track_max_age_ms: 1500
   track_iou_threshold: 0.25
-  track_max_center_shift_ratio: 0.75
-  track_max_area_ratio: 2.5
   timeline_idle_ms: 3000
 
 trigger_thresholds:
   prolonged_floor_lying_duration_sec: 1800
 
 room_rois: {}                   # 예: bed: [0.0, 0.0, 0.5, 1.0] normalized x1,y1,x2,y2
-
-roi_bootstrap:
-  enabled: false
-  fail_closed: true
-  model_path: "edge/models/sam3.pt"
-  output_path: "edge/storage/masks/mask_map.json"
-  reuse_until_reboot: true
-  required_rois: ["bed", "floor", "chair"]
-  prompts:
-    bed: "bed"
-    floor: "floor"
-    chair: "chair"
-  confidence: 0.25
-
-manual_roi:
-  enabled: false
-  fail_closed: true
-  state_path: "edge/storage/roi/manual_roi_state.json"
-  required_rois: ["bed", "floor", "chair"]
-  persistent_across_reboot: true
 
 time_context:
   use_wall_clock_for_night_activity: false
@@ -114,7 +92,7 @@ buffer:
   danger_clip_max_duration_ms: 600000
   codec: "mp4v"
   index_file: "segments_index.jsonl"
-  write_enabled: false
+  write_enabled: false        # clip 인코딩 CPU 부하 해제 (OPT-POSE-2/3): true로 변경 시 clip 저장 재활성화
 
 stream:
   enabled: true
@@ -134,10 +112,10 @@ stream:
 
 server:
   enabled: true                 # 단독 테스트 시 --disable-server 사용
-  base_url: "http://192.168.45.110:8000"
-  ws_url: "ws://192.168.45.110:8000/ws/edges/{camera_id}"
+  base_url: "http://orin:8000"
+  ws_url: "ws://orin:8000/ws/edges/{camera_id}"
   skeleton_ws_enabled: true
-  skeleton_ws_url: "ws://192.168.45.110:8000/ws/skeleton/raspi_cam01"
+  skeleton_ws_url: "ws://orin:8000/ws/skeleton/raspi_cam01"
   skeleton_ws_pending_file: "edge/storage/results/skeleton_ws_pending.jsonl"
   skeleton_ws_max_pending_batches: 300
   skeleton_ws_max_reconnect_attempts: 2

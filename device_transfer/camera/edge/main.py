@@ -30,8 +30,14 @@ from edge.tracker import SimpleTracker
 from edge.trigger_engine import TriggerEngine
 from edge.video_buffer import RollingVideoBuffer
 from edge.ws_sender import SkeletonWebSocketSender
-from tools.roi_bootstrap import BootRoiBootstrap
-from tools.manual_roi_store import ManualRoiError, load_manual_room_rois
+try:
+    from tools.roi_bootstrap import BootRoiBootstrap
+    from tools.manual_roi_store import ManualRoiError, load_manual_room_rois
+except ImportError:
+    BootRoiBootstrap = None
+    ManualRoiError = Exception
+    def load_manual_room_rois(state_path: Any) -> Any:
+        return None
 from shared.protocol import (
     ActivityFrame,
     ActivityFrameBatch,
@@ -669,7 +675,7 @@ def main() -> None:
             config["classification"].get("track_max_area_ratio", 2.5)
         ),
     )
-    roi_bootstrap = BootRoiBootstrap(config)
+    roi_bootstrap = BootRoiBootstrap(config) if BootRoiBootstrap is not None else None
     classifier = None if skeleton_sender_role else ActionClassifier(config)
     tier_classifier = None if skeleton_sender_role else TierClassifier(config)
     trigger_engine = None if skeleton_sender_role else TriggerEngine(config)
@@ -707,9 +713,9 @@ def main() -> None:
 
     camera.open()
     manual_rois_ready = load_manual_rois_from_config(config)
-    enforce_roi_context(config, manual_rois_ready=manual_rois_ready, roi_bootstrap_enabled=roi_bootstrap.enabled)
+    enforce_roi_context(config, manual_rois_ready=manual_rois_ready, roi_bootstrap_enabled=bool(roi_bootstrap.enabled) if roi_bootstrap is not None else False)
     first_packet = None
-    if not manual_rois_ready and roi_bootstrap.enabled:
+    if not manual_rois_ready and roi_bootstrap is not None and roi_bootstrap.enabled:
         first_packet = camera.read()
         if first_packet is None:
             raise RuntimeError("SAM3 ROI bootstrap could not read the first camera frame")

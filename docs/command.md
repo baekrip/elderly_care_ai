@@ -15939,3 +15939,14 @@ ONNX 최적화 및 모델 경량화를 통해 1프레임 지연이 112ms 수준�
 | 결과 | 19개 test 모두 PASS다. Pi 배포 SHA, active service, 30 FPS/drop 0 telemetry, PC 영상 replay geometry mismatch 0은 기존 기록과 일치한다. 모델/config 변경, 카메라 테스트, 추가 기기 변경은 수행하지 않았다. |
 | 세부 시간 | 2026-07-23 18:50:51 KST |
 | 사용된 모델 | Current Codex model; standalone agbrowse ChatGPT query sent without `--model`, `--effort`, or UI model selection; response unavailable due poll timeout; `multi_agent_v2` not created or used |
+
+
+# 2026-07-24 01:50:00 KST 실기기(Pi 5 & Jetson Orin) 실제 최신 소스코드 수신 및 저장소 커밋/푸시
+
+| Item | Details |
+|---|---|
+| 사용자 지시 | Raspberry Pi 5 및 Jetson Orin 실기기에서 구동 중인 최신 소스코드를 직접 불러와 @device_transfer/ 최신화 후 GitHub 커밋/푸시 진행 |
+| 수행 내용 | 1. SSH tar 스트림을 사용하여 Raspberry Pi 5(192.168.45.29) 및 Jetson Orin(192.168.45.110) 기기 내 구동 중인 실제 소스파일 전수를 직접 수신함.<br>2. 수신한 실기기 코드 기반으로 `@device_transfer/camera/` 및 `@device_transfer/Edge/` 디렉터리를 완전 동기화함.<br>3. 백업 임시 파일(.bak, .orig, .pre_*)을 정제한 후 스테이징 및 단일 커밋 작성 및 GitHub `main` 브랜치에 푸시 완료. |
+| 결과 | 실제 Pi 5 및 Jetson Orin 기기 구동 소스코드 전수 동기화 및 GitHub 저장소 업로드 완료. |
+| 세부 시간 | 2026-07-24 01:50:00 KST |
+| 사용된 모델 | Current Codex model; standalone agbrowse ChatGPT status checked without model/effort flags or UI model selection; multi_agent_v2 strictly forbidden and not used |

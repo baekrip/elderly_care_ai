@@ -112,8 +112,6 @@ class FeatureExtractor:
                 "bbox_aspect_ratio": bbox_w / max(bbox_h, 1),
                 "pose_confidence_mean": float(np.mean(confs)),
                 "visible_joint_ratio": float(np.mean(confs > 0.3)),
-                "keypoint_dropout_rate": float(1.0 - np.mean(confs > 0.3)),
-                "no_silent_drop": True,
                 "visibility_ratio": float(np.mean(confs > 0.3)),
             }
         )
