@@ -1,0 +1,14 @@
+Flask==3.0.3
+flask-cors==6.0.2
+flask-jwt-extended==4.7.1
+SQLAlchemy==2.0.32
+psycopg[binary]==3.2.13
+bcrypt==5.0.0
+python-dotenv==1.0.1
+requests==2.32.3
+APScheduler==3.10.4
+boto3==1.35.49
+
+# 운영(EC2)/컨테이너 전용 WSGI 서버. gunicorn은 유닉스 전용이라
+# 환경 마커로 Windows 로컬 개발 시에는 설치를 건너뛴다.
+gunicorn==25.3.0; platform_system != "Windows"

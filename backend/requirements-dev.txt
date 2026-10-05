@@ -1,0 +1,5 @@
+# 로컬 개발/테스트 전용. 서버 venv 에는 설치하지 않는다.
+# (운영은 requirements.txt 만 사용 — systemd가 venv/bin/gunicorn 으로 직접 띄움)
+-r requirements.txt
+
+pytest==8.3.3
